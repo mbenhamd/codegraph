@@ -26,6 +26,7 @@ npm test                # vitest run (all)
 npm run test:watch
 npm run test:eval -- .  # run __tests__/evaluation/runner.ts against an indexed repo
 npm run eval -- .       # build, then run the evaluation runner
+npm run bench:index -- /path/to/repo --json
 
 npm run cli             # build then run the local dist binary
 
@@ -70,7 +71,7 @@ The public API surface is `src/index.ts` — the `CodeGraph` class wires all the
 - `src/sync/` — `FileWatcher` (native FSEvents/inotify/RDCW) with debounce + filter, and git-hook helpers.
 - `src/mcp/` — MCP server (`MCPServer`, `tools.ts`, `transport.ts`). `server-instructions.ts` is what the server returns in the MCP `initialize` response — keep it in sync with the user-facing tool guidance.
 - `src/installer/` — see below.
-- `src/bin/codegraph.ts` — CLI (commander). Subcommands: `install`, `init`, `uninit`, `index`, `sync`, `status`, `inventory`, `query`, `files`, `context`, `affected`, `serve --mcp`.
+- `src/bin/codegraph.ts` — CLI (commander). Subcommands: `install`, `init`, `uninit`, `index`, `sync`, `status`, `inventory`, `benchmark`, `query`, `files`, `context`, `affected`, `serve --mcp`.
 - `src/ui/` — terminal UI (shimmer progress, worker).
 
 ### NodeKind / EdgeKind

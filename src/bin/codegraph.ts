@@ -14,6 +14,7 @@
  *   codegraph sync [path]        Sync changes since last index
  *   codegraph status [path]      Show index status
  *   codegraph inventory [path]   Summarize rewrite-relevant repo artifacts
+ *   codegraph benchmark [path]   Measure index and query latency
  *   codegraph query <search>     Search for symbols
  *   codegraph files [options]    Show project file structure
  *   codegraph context <task>     Build context for a task
@@ -223,6 +224,29 @@ function formatDuration(ms: number): string {
   return `${minutes}m ${remainingSeconds.toFixed(0)}s`;
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function parsePositiveIntOption(value: string, optionName: string): number {
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new Error(`${optionName} must be a positive integer`);
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${optionName} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  previous.push(value);
+  return previous;
+}
+
 // Shimmer progress renderer (runs in a worker thread for smooth animation)
 // Imported at top of file from '../ui/shimmer-progress'
 
@@ -372,6 +396,64 @@ function printIndexResult(clack: typeof import('@clack/prompts'), result: IndexR
       fs.unlinkSync(logPath);
     }
   }
+}
+
+type BenchmarkReport = Awaited<ReturnType<typeof import('../benchmark').runBenchmark>>;
+
+function printBenchmarkReport(report: BenchmarkReport): void {
+  console.log(chalk.bold('\nCodeGraph Benchmark\n'));
+  console.log(chalk.cyan('Project:'), report.projectPath);
+  console.log(chalk.cyan('Mode:'), [
+    report.mode.cold ? 'cold' : 'warm',
+    report.mode.reindexed ? 'reindexed' : undefined,
+    report.mode.cleanedUp ? 'cleaned up' : undefined,
+  ].filter(Boolean).join(', '));
+  console.log();
+
+  console.log(chalk.bold('Timings:'));
+  console.log(`  Total:     ${formatDuration(report.timings.totalMs)}`);
+  if (report.timings.indexMs !== undefined) {
+    console.log(`  Index:     ${formatDuration(report.timings.indexMs)}`);
+  } else {
+    console.log('  Index:     reused existing index');
+  }
+  console.log(`  Status:    ${formatDuration(report.timings.statusMs)}`);
+  console.log();
+
+  console.log(chalk.bold('Index Statistics:'));
+  console.log(`  Files:     ${formatNumber(report.stats.fileCount)}`);
+  console.log(`  Nodes:     ${formatNumber(report.stats.nodeCount)}`);
+  console.log(`  Edges:     ${formatNumber(report.stats.edgeCount)}`);
+  console.log(`  DB Size:   ${formatBytes(report.stats.dbSizeBytes)}`);
+  console.log(`  Peak RSS:  ${formatBytes(report.memory.peakRssBytes)}`);
+  if (report.indexResult) {
+    console.log(`  Created:   ${formatNumber(report.indexResult.nodesCreated)} nodes, ${formatNumber(report.indexResult.edgesCreated)} edges`);
+    if (report.indexResult.filesErrored > 0) {
+      console.log(chalk.yellow(`  Errors:    ${formatNumber(report.indexResult.filesErrored)} files could not be parsed`));
+    }
+  }
+  console.log();
+
+  if (report.queries.length > 0) {
+    console.log(chalk.bold('Queries:'));
+    for (const query of report.queries) {
+      const counts = [
+        query.resultCount !== undefined ? `${formatNumber(query.resultCount)} results` : undefined,
+        query.nodeCount !== undefined ? `${formatNumber(query.nodeCount)} nodes` : undefined,
+        query.edgeCount !== undefined ? `${formatNumber(query.edgeCount)} edges` : undefined,
+        query.outputBytes !== undefined ? `${formatBytes(query.outputBytes)}` : undefined,
+      ].filter(Boolean).join(', ');
+      const suffix = counts ? ` ${getGlyphs().dash} ${counts}` : '';
+      const status = query.ok ? chalk.green(getGlyphs().ok) : chalk.red(getGlyphs().err);
+      console.log(`  ${status} ${query.spec}: ${formatDuration(query.durationMs)}${suffix}`);
+      if (query.error) {
+        console.log(chalk.dim(`    ${query.error}`));
+      }
+    }
+    console.log();
+  }
+
+  success('Benchmark complete');
 }
 
 /**
@@ -834,6 +916,76 @@ program
       cg.destroy();
     } catch (err) {
       error(`Failed to get status: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
+ * codegraph benchmark [path]
+ */
+program
+  .command('benchmark [path]')
+  .alias('bench')
+  .description('Benchmark indexing and graph query latency for a project')
+  .option('--cold', 'Delete any existing index before benchmarking (requires --force when an index exists)')
+  .option('--reindex', 'Clear and rebuild an existing index before query benchmarks (requires --force when an index exists)')
+  .option('--force', 'Allow destructive benchmark setup such as deleting an existing .codegraph index')
+  .option('--cleanup', 'Remove the benchmark-created index after the run')
+  .option('--query <spec>', 'Query to benchmark; repeatable. Formats: search:x, context:x, callers:x, callees:x, impact:x', collectOption, [] as string[])
+  .option('--query-limit <number>', 'Maximum search matches used by query benchmarks', '20')
+  .option('--context-max-nodes <number>', 'Maximum nodes for context query benchmarks', '50')
+  .option('--include-context-code', 'Include source code blocks in context query benchmarks')
+  .option('-j, --json', 'Output the full benchmark report as JSON')
+  .option('-o, --output <file>', 'Write the full benchmark report JSON to a file')
+  .action(async (pathArg: string | undefined, options: {
+    cold?: boolean;
+    reindex?: boolean;
+    force?: boolean;
+    cleanup?: boolean;
+    query?: string[];
+    queryLimit?: string;
+    contextMaxNodes?: string;
+    includeContextCode?: boolean;
+    json?: boolean;
+    output?: string;
+  }) => {
+    const projectPath = path.resolve(pathArg || process.cwd());
+
+    try {
+      const { runBenchmark } = await import('../benchmark');
+      const report = await runBenchmark(projectPath, {
+        cold: options.cold,
+        reindex: options.reindex,
+        force: options.force,
+        cleanup: options.cleanup,
+        queries: options.query,
+        queryLimit: parsePositiveIntOption(options.queryLimit || '20', '--query-limit'),
+        contextMaxNodes: parsePositiveIntOption(options.contextMaxNodes || '50', '--context-max-nodes'),
+        includeContextCode: options.includeContextCode,
+      });
+
+      const json = JSON.stringify(report, null, 2);
+      if (options.output) {
+        fs.writeFileSync(path.resolve(options.output), `${json}\n`, 'utf8');
+      }
+
+      if (options.json) {
+        console.log(json);
+      } else {
+        printBenchmarkReport(report);
+        if (options.output) {
+          info(`Wrote JSON report to ${path.resolve(options.output)}`);
+        }
+      }
+
+      if (report.indexResult && !report.indexResult.success) {
+        process.exit(1);
+      }
+      if (report.queries.some((query) => !query.ok)) {
+        process.exit(1);
+      }
+    } catch (err) {
+      error(`Benchmark failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });
