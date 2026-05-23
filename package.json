@@ -20,8 +20,10 @@
     "cli": "npm run build && node dist/bin/codegraph.js",
     "test": "node --liftoff-only ./node_modules/vitest/vitest.mjs run",
     "test:watch": "node --liftoff-only ./node_modules/vitest/vitest.mjs",
-    "test:eval": "node --liftoff-only ./node_modules/tsx/dist/cli.mjs __tests__/evaluation/runner.ts",
-    "eval": "npm run build && npm run test:eval --",
+    "test:eval": "npm run build && tsc -p tsconfig.eval.json && node --liftoff-only .eval-build/__tests__/evaluation/runner.js",
+    "test:eval:structural": "npm run build && tsc -p tsconfig.eval.json && node --liftoff-only .eval-build/__tests__/evaluation/runner.js --fixture structural",
+    "test:eval:structural:strict": "npm run build && tsc -p tsconfig.eval.json && node --liftoff-only .eval-build/__tests__/evaluation/runner.js --fixture structural --strict-tracked",
+    "eval": "npm run test:eval --",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
   },
   "keywords": [

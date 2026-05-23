@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": ".eval-build",
+    "rootDir": ".",
+    "sourceMap": false,
+    "target": "ES2022"
+  },
+  "include": ["__tests__/evaluation/*.ts"],
+  "exclude": ["node_modules", "dist", ".eval-build"]
+}

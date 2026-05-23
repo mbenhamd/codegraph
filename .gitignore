@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+.eval-build/
 
 .cmem
 
@@ -20,6 +21,7 @@ Thumbs.db
 # Test coverage
 /coverage/
 .nyc_output/
+__tests__/evaluation/results/
 
 # Environment
 .env

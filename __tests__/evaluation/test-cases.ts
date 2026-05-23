@@ -1,10 +1,11 @@
 import type { EvalTestCase } from './types.js';
 
-export const testCases: EvalTestCase[] = [
+export const externalTestCases: EvalTestCase[] = [
   // === searchNodes: Symbol Lookup Precision ===
 
   {
     id: 'search-class-exact',
+    suite: 'external',
     query: 'TransportService',
     api: 'searchNodes',
     expectedSymbols: ['TransportService'],
@@ -12,6 +13,7 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'search-method-qualified',
+    suite: 'external',
     query: 'TransportService sendRequest',
     api: 'searchNodes',
     expectedSymbols: ['sendRequest'],
@@ -19,6 +21,7 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'search-interface',
+    suite: 'external',
     query: 'ActionListener',
     api: 'searchNodes',
     expectedSymbols: ['ActionListener'],
@@ -26,6 +29,7 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'search-enum',
+    suite: 'external',
     query: 'RestStatus',
     api: 'searchNodes',
     expectedSymbols: ['RestStatus'],
@@ -33,6 +37,7 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'search-exception',
+    suite: 'external',
     query: 'SearchPhaseExecutionException',
     api: 'searchNodes',
     expectedSymbols: ['SearchPhaseExecutionException'],
@@ -40,6 +45,7 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'search-nested-class',
+    suite: 'external',
     query: 'Engine Index',
     api: 'searchNodes',
     expectedSymbols: ['Index'],
@@ -50,6 +56,7 @@ export const testCases: EvalTestCase[] = [
 
   {
     id: 'explore-rest-layer',
+    suite: 'external',
     query: 'How does the REST layer handle HTTP requests?',
     api: 'findRelevantContext',
     expectedSymbols: ['RestController', 'RestHandler', 'BaseRestHandler', 'RestRequest'],
@@ -57,6 +64,7 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'explore-search-execution',
+    suite: 'external',
     query: 'How does search execution work from request to shard?',
     api: 'findRelevantContext',
     expectedSymbols: ['ShardSearchRequest', 'SearchShardsRequest', 'SearchShardsGroup'],
@@ -64,6 +72,7 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'explore-bulk-indexing',
+    suite: 'external',
     query: 'How does bulk indexing work?',
     api: 'findRelevantContext',
     expectedSymbols: ['TransportBulkAction', 'BulkRequest', 'BulkResponse'],
@@ -71,6 +80,7 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'explore-shard-allocation',
+    suite: 'external',
     query: 'How does shard rebalancing and allocation work?',
     api: 'findRelevantContext',
     expectedSymbols: ['AllocationService', 'BalancedShardsAllocator'],
@@ -78,6 +88,7 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'explore-transport-search',
+    suite: 'external',
     query: 'How does TransportService connect to SearchTransportService?',
     api: 'findRelevantContext',
     expectedSymbols: ['TransportService', 'SearchTransportService'],
@@ -85,9 +96,99 @@ export const testCases: EvalTestCase[] = [
   },
   {
     id: 'explore-engine-implementations',
+    suite: 'external',
     query: 'What are the Engine implementations for indexing?',
     api: 'findRelevantContext',
     expectedSymbols: ['InternalEngine', 'ReadOnlyEngine', 'Engine'],
     options: { searchLimit: 8, traversalDepth: 3, maxNodes: 80, minScore: 0.2 },
+  },
+];
+
+export const structuralTestCases: EvalTestCase[] = [
+  // === structural self-eval fixture ===
+
+  {
+    id: 'struct-search-duplicate-symbol-no-vendor-noise',
+    suite: 'structural',
+    query: 'PaymentService',
+    api: 'searchNodes',
+    expectedSymbols: ['PaymentService'],
+    expectedMatches: [{ name: 'PaymentService', filePath: 'src/app/payment-service.ts' }],
+    noisePathPatterns: ['^third_party/', '^vendor/', '^generated/'],
+    kinds: ['class'],
+    required: false,
+  },
+  {
+    id: 'struct-callers-wrapper-callback',
+    suite: 'structural',
+    api: 'callers',
+    targetSymbol: 'persistOrder',
+    targetFilePath: 'src/core/persist.ts',
+    targetKinds: ['function'],
+    expectedSymbols: ['saveOrder'],
+    expectedMatches: [{ name: 'saveOrder', filePath: 'src/app/wrapper.ts' }],
+    forbiddenSymbols: ['defaults'],
+    maxDepth: 2,
+    required: false,
+  },
+  {
+    id: 'struct-callees-alias-barrel-js-specifier',
+    suite: 'structural',
+    api: 'callees',
+    targetSymbol: 'checkout',
+    targetFilePath: 'src/app/checkout.ts',
+    targetKinds: ['function'],
+    expectedSymbols: ['persistOrder'],
+    expectedMatches: [{ name: 'persistOrder', filePath: 'src/core/persist.ts' }],
+    forbiddenSymbols: ['duplicateName'],
+    maxDepth: 2,
+    required: false,
+  },
+  {
+    id: 'struct-impact-alias-barrel-js-specifier',
+    suite: 'structural',
+    api: 'impact',
+    targetSymbol: 'persistOrder',
+    targetFilePath: 'src/core/persist.ts',
+    targetKinds: ['function'],
+    expectedSymbols: ['checkout'],
+    expectedMatches: [{ name: 'checkout', filePath: 'src/app/checkout.ts' }],
+    forbiddenSymbols: ['useDuplicate'],
+    maxDepth: 2,
+    required: false,
+  },
+  {
+    id: 'struct-framework-route-to-handler',
+    suite: 'structural',
+    api: 'callers',
+    targetSymbol: 'listOrders',
+    targetFilePath: 'src/routes/orders.ts',
+    targetKinds: ['function'],
+    expectedSymbols: ['GET /orders'],
+    expectedMatches: [{ name: 'GET /orders', filePath: 'src/routes/orders.ts' }],
+    maxDepth: 1,
+  },
+  {
+    id: 'struct-context-monorepo-noise',
+    suite: 'structural',
+    query: 'How does checkout persist orders?',
+    api: 'findRelevantContext',
+    expectedSymbols: ['checkout', 'persistOrder'],
+    expectedMatches: [
+      { name: 'checkout', filePath: 'src/app/checkout.ts' },
+      { name: 'persistOrder', filePath: 'src/core/persist.ts' },
+    ],
+    noisePathPatterns: ['^third_party/', '^vendor/', '^generated/'],
+    options: { searchLimit: 8, traversalDepth: 2, maxNodes: 40, minScore: 0.1 },
+    required: false,
+  },
+  {
+    id: 'struct-literal-task-bypass',
+    suite: 'structural',
+    query: 'Find exact string EVAL_LITERAL_NEEDLE_42',
+    api: 'literalBypass',
+    literalText: 'EVAL_LITERAL_NEEDLE_42',
+    expectedSymbols: ['src/literals/messages.ts'],
+    expectedMatches: [{ name: 'src/literals/messages.ts', filePath: 'src/literals/messages.ts' }],
   },
 ];
