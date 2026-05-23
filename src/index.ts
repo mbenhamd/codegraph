@@ -78,6 +78,13 @@ export {
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
 export { FileWatcher, WatchOptions } from './sync';
 export { MCPServer } from './mcp';
+export {
+  buildRepositoryInventory,
+  InventoryArtifact,
+  InventoryArtifactKind,
+  InventoryPackage,
+  RepositoryInventory,
+} from './inventory';
 
 /**
  * Options for initializing a new CodeGraph project
