@@ -422,6 +422,42 @@ about), `0.7–0.9` as likely-correct same-module matches, `0.4–0.7` as
 cross-module matches worth verifying, and `< 0.4` as suggestions you
 should double-check against source.
 
+### MCP cross-project allowlist
+
+When running as `codegraph serve --mcp`, the server gates the optional
+`projectPath` argument every MCP tool accepts. Without configuration,
+only the server's primary project root (`--path` or `rootUri`) is
+allowed; tool calls that point outside it fail closed with a minimal
+error that does not echo the resolved target or allowed-root paths
+(probing-resistant). The structured `allowedRoots` field on the gate
+result is available for server-side logging when you need it.
+
+Add extra allowed roots when you genuinely want cross-repo queries:
+
+```bash
+codegraph serve --mcp \
+  --path /repo/main \
+  --allow-root /repo/secondary \
+  --allow-root /repo/upstream-reference
+
+# Or via env (':'-separated like PATH):
+CODEGRAPH_MCP_ALLOW_ROOTS=/repo/secondary:/repo/upstream-reference \
+  codegraph serve --mcp --path /repo/main
+```
+
+To restore the pre-PF-619 behavior (any reachable project allowed):
+
+```bash
+codegraph serve --mcp --path /repo/main --allow-any
+# or
+CODEGRAPH_MCP_ALLOW_ANY=1 codegraph serve --mcp --path /repo/main
+```
+
+Allowed roots are resolved through `realpath` before comparison so
+symlink escapes and `..` traversal cannot smuggle a request outside
+the configured roots. A request is allowed when the resolved path
+equals OR is a descendant of at least one allowed root.
+
 ### `codegraph affected`
 
 Traces import dependencies transitively to find which test files are affected by changed source files.

@@ -20,6 +20,22 @@ import CodeGraph, { findNearestCodeGraphRoot } from '../index';
 import { watchDisabledReason } from '../sync';
 import { StdioTransport, JsonRpcRequest, JsonRpcNotification, ErrorCodes } from './transport';
 import { tools, ToolHandler } from './tools';
+import { ProjectAccessGate } from './project-access';
+
+export interface MCPServerOptions {
+  /** Default project root the server was launched with. */
+  projectPath?: string;
+  /**
+   * Additional roots beyond the default that are allowed for cross-project
+   * queries (e.g. from `--allow-root` or `CODEGRAPH_MCP_ALLOW_ROOTS`).
+   */
+  extraAllowRoots?: string[];
+  /**
+   * Restore pre-PF-619 open behavior (any reachable project allowed).
+   * Off by default; turn on with `--allow-any` or `CODEGRAPH_MCP_ALLOW_ANY=1`.
+   */
+  allowAny?: boolean;
+}
 import { SERVER_INSTRUCTIONS } from './server-instructions';
 import { HOST_PPID_ENV } from '../extraction/wasm-runtime-flags';
 
@@ -155,11 +171,38 @@ export class MCPServer {
   // the transport before process.exit() lands.
   private stopped = false;
 
-  constructor(projectPath?: string) {
-    this.projectPath = projectPath || null;
+  // Extra allowed roots (PF-619) — held until the default root is known
+  // (after rootUri / explicit --path / cwd fallback) so the access gate can
+  // be configured with the full set at once.
+  private extraAllowRoots: string[];
+  private allowAny: boolean;
+
+  constructor(options?: MCPServerOptions) {
+    this.projectPath = options?.projectPath || null;
+    this.extraAllowRoots = options?.extraAllowRoots ?? [];
+    this.allowAny = options?.allowAny ?? false;
     this.transport = new StdioTransport();
     // Create ToolHandler eagerly — cross-project queries work even without a default project
     this.toolHandler = new ToolHandler(null);
+    this.applyProjectAccess();
+  }
+
+  /**
+   * Rebuild the cross-project access gate. Called from the constructor and
+   * whenever the default root changes (after `rootUri`, explicit --path, or
+   * cwd fallback) so the gate's allowed roots reflect the current
+   * configuration. The default root is always allowed; extras come from
+   * `--allow-root` / `CODEGRAPH_MCP_ALLOW_ROOTS`. `--allow-any` /
+   * `CODEGRAPH_MCP_ALLOW_ANY=1` restores the pre-PF-619 open behavior.
+   */
+  private applyProjectAccess(): void {
+    this.toolHandler.setProjectAccess(
+      new ProjectAccessGate({
+        defaultRoot: this.projectPath,
+        extraRoots: this.extraAllowRoots,
+        allowAny: this.allowAny,
+      }),
+    );
   }
 
   /**
@@ -234,10 +277,12 @@ export class MCPServer {
 
     if (!resolvedRoot) {
       this.projectPath = projectPath;
+      this.applyProjectAccess();
       return;
     }
 
     this.projectPath = resolvedRoot;
+    this.applyProjectAccess();
 
     try {
       this.cg = await CodeGraph.open(resolvedRoot);
@@ -299,6 +344,7 @@ export class MCPServer {
       }
       this.cg = CodeGraph.openSync(resolvedRoot);
       this.projectPath = resolvedRoot;
+      this.applyProjectAccess();
       this.toolHandler.setDefaultCodeGraph(this.cg);
       this.startWatching();
     } catch {

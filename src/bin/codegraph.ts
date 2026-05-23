@@ -1465,7 +1465,18 @@ program
   .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
   .option('--mcp', 'Run as MCP server (stdio transport)')
   .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
-  .action(async (options: { path?: string; mcp?: boolean; watch?: boolean }) => {
+  .option(
+    '--allow-root <path>',
+    'Additional project root to allow for cross-project MCP tool calls (repeatable). ' +
+      'The default --path root is always allowed.',
+    collectOption,
+    [] as string[],
+  )
+  .option(
+    '--allow-any',
+    'Allow MCP tool calls to open any reachable project (pre-PF-619 behavior). Off by default.',
+  )
+  .action(async (options: { path?: string; mcp?: boolean; watch?: boolean; allowRoot?: string[]; allowAny?: boolean }) => {
     const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
 
     // Commander sets watch=false when --no-watch is passed. Route it through
@@ -1478,7 +1489,13 @@ program
       if (options.mcp) {
         // Start MCP server - it handles initialization lazily based on rootUri from client
         const { MCPServer } = await import('../mcp/index');
-        const server = new MCPServer(projectPath);
+        const { parseAllowRootsEnv, parseAllowAnyEnv } = await import('../mcp/project-access');
+        const flagRoots = options.allowRoot ?? [];
+        const envRoots = parseAllowRootsEnv(process.env.CODEGRAPH_MCP_ALLOW_ROOTS);
+        const extraAllowRoots = [...flagRoots, ...envRoots]
+          .map((p) => resolveProjectPath(p));
+        const allowAny = Boolean(options.allowAny) || parseAllowAnyEnv(process.env.CODEGRAPH_MCP_ALLOW_ANY);
+        const server = new MCPServer({ projectPath, extraAllowRoots, allowAny });
         await server.start();
         // Server will run until terminated
       } else {
