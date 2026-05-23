@@ -1442,6 +1442,7 @@ export class ToolHandler {
   private async handleStatus(args: Record<string, unknown>): Promise<ToolResult> {
     const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const stats = cg.getStats();
+    const safety = cg.getIndexSafetyStats();
 
     const lines: string[] = [
       '## CodeGraph Status',
@@ -1484,6 +1485,14 @@ export class ToolHandler {
         lines.push(`- ${lang}: ${count}`);
       }
     }
+
+    lines.push('', '### Index Safety:');
+    lines.push(`- Sensitive files skipped: ${safety.sensitiveFilesSkipped}`);
+    const reasons = Object.entries(safety.sensitiveFilesByReason).sort();
+    for (const [reason, count] of reasons) {
+      lines.push(`- ${reason}: ${count}`);
+    }
+    lines.push('- Gitignored files: excluded by git/.gitignore and not enumerated');
 
     return this.textResult(lines.join('\n'));
   }

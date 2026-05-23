@@ -421,14 +421,24 @@ What that means in practice:
 
 - Anything git ignores — `node_modules`, build output, secrets in `.env` — is
   never indexed. **To keep something out of the graph, add it to `.gitignore`.**
+- CodeGraph also skips high-risk secret paths by filename without reading their
+  contents: `.env` / `.env.*`, common private-key files such as `id_rsa`, and
+  key material extensions such as `.key`, `.pem`, `.p8`, `.p12`, and `.pfx`.
+- Source files whose basename is explicitly secret-like, such as `secrets.ts`,
+  `credentials.ts`, `client.secret.ts`, or `private-key.ts`, are skipped even if
+  their extension is otherwise supported. CodeGraph does not scan file contents
+  for secret strings, so non-secret source should avoid those basenames.
 - There's no config file to write or keep in sync, and nothing to wire up per
   language: support is automatic from the file extension.
 - Files larger than 1 MB are skipped (generated bundles, minified JS, vendored
   blobs) — they cost parse budget for no useful symbols.
+- `codegraph status` reports aggregate sensitive-file skip counts and categories
+  only; it does not print skipped file names or contents.
 
 > Committed files that aren't gitignored *are* indexed, even under `vendor/` or a
 > committed `dist/`. If you commit a dependency or build directory you don't want
-> in the graph, add it to `.gitignore`.
+> in the graph, add it to `.gitignore`. The only built-in exception is the
+> high-risk secret path policy listed above.
 
 ## Supported Platforms
 

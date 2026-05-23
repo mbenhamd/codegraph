@@ -17,6 +17,15 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Added Claude auto-allow coverage for the guidance's recommended
   `codegraph_explore` path and `codegraph_files`.
 
+### Added
+- Added path-only sensitive-file safety skips for common env, private-key, and
+  explicitly secret-like source filenames, plus aggregate `codegraph status` /
+  MCP status reporting that avoids printing skipped names or contents.
+- Added regression coverage for root and nested `.gitignore` handling,
+  git-ignored untracked files, ignored symlinked directories, direct indexing,
+  watch-triggered `.gitignore` changes, and sync paths so sensitive files stay
+  out of the graph after initial index.
+
 ## [0.9.4] - 2026-05-22
 
 ### Fixed

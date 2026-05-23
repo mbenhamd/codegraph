@@ -108,8 +108,10 @@ export class FileWatcher {
             return;
           }
 
-          // Only sync changes to files we can actually parse.
-          if (!isSourceFile(normalized)) {
+          // Only sync changes to files we can parse or ignore-rule changes
+          // that may require purging previously indexed files.
+          const isGitignoreChange = normalized === '.gitignore' || normalized.endsWith('/.gitignore');
+          if (!isGitignoreChange && !isSourceFile(normalized)) {
             return;
           }
 

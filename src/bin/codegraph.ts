@@ -725,6 +725,7 @@ program
       const changes = cg.getChangedFiles();
       const backend = cg.getBackend();
       const journalMode = cg.getJournalMode();
+      const safety = cg.getIndexSafetyStats();
 
       // JSON output mode
       if (options.json) {
@@ -737,6 +738,11 @@ program
           dbSizeBytes: stats.dbSizeBytes,
           backend,
           journalMode,
+          indexSafety: {
+            sensitiveFilesSkipped: safety.sensitiveFilesSkipped,
+            sensitiveFilesByReason: safety.sensitiveFilesByReason,
+            gitignoredFiles: 'excluded by git/.gitignore and not enumerated',
+          },
           nodesByKind: stats.nodesByKind,
           languages: Object.entries(stats.filesByLanguage).filter(([, count]) => count > 0).map(([lang]) => lang),
           pendingChanges: {
@@ -773,6 +779,16 @@ program
         ? chalk.green('wal')
         : chalk.yellow(`${journalMode || 'unknown'} ${getGlyphs().dash} WAL inactive; reads can block on writes`);
       console.log(`  Journal:   ${journalLabel}`);
+      console.log();
+
+      console.log(chalk.bold('Index Safety:'));
+      console.log(`  Sensitive files skipped: ${formatNumber(safety.sensitiveFilesSkipped)}`);
+      if (safety.sensitiveFilesSkipped > 0) {
+        for (const [reason, count] of Object.entries(safety.sensitiveFilesByReason).sort()) {
+          console.log(`  ${reason.padEnd(20)} ${formatNumber(count)}`);
+        }
+      }
+      console.log('  Gitignored files: excluded by git/.gitignore and not enumerated');
       console.log();
 
       // Node breakdown

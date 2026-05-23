@@ -34,6 +34,7 @@ import {
   ExtractionOrchestrator,
   IndexProgress,
   IndexResult,
+  ScanSafetyStats,
   SyncResult,
   extractFromSource,
   initGrammars,
@@ -565,6 +566,14 @@ export class CodeGraph {
     const stats = this.queries.getStats();
     stats.dbSizeBytes = this.db.getSize();
     return stats;
+  }
+
+  /**
+   * Aggregate indexing safety skips from the last full scan. This reports
+   * counts and categories only — never file names or contents.
+   */
+  getIndexSafetyStats(): ScanSafetyStats {
+    return this.orchestrator.getIndexSafetyStats();
   }
 
   /**

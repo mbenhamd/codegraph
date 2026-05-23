@@ -145,6 +145,24 @@ describe('FileWatcher', () => {
       watcher.stop();
     });
 
+    it('should trigger sync when .gitignore changes', async () => {
+      const syncFn = vi.fn().mockResolvedValue({ filesChanged: 0, durationMs: 0 });
+      const watcher = new FileWatcher(testDir, syncFn, { debounceMs: 200 });
+
+      watcher.start();
+
+      // Let watcher settle — fs.watch may fire residual events from beforeEach
+      await new Promise((r) => setTimeout(r, 400));
+      syncFn.mockClear();
+
+      fs.writeFileSync(path.join(testDir, '.gitignore'), 'src/index.ts\n');
+
+      await waitFor(() => syncFn.mock.calls.length > 0, 5000);
+      expect(syncFn).toHaveBeenCalled();
+
+      watcher.stop();
+    });
+
     it('should ignore .codegraph directory changes', async () => {
       const syncFn = vi.fn().mockResolvedValue({ filesChanged: 0, durationMs: 0 });
       const watcher = new FileWatcher(testDir, syncFn, { debounceMs: 200 });
