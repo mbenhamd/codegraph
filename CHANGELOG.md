@@ -7,6 +7,16 @@ a [GitHub Release](https://github.com/colbymchenry/codegraph/releases) tagged
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+- Calibrated installed-agent and MCP guidance so CodeGraph is presented as the
+  preferred first pass for structural code questions, while exact text searches
+  stay with native grep/read and low-confidence or edit-critical conclusions
+  should be verified against source, tests, or typecheck.
+- Added Claude auto-allow coverage for the guidance's recommended
+  `codegraph_explore` path and `codegraph_files`.
+
 ## [0.9.4] - 2026-05-22
 
 ### Fixed
@@ -562,8 +572,8 @@ npm i -g @colbymchenry/codegraph
   inherited from the Claude-only era and prescribed "spawn an Explore agent" —
   a Claude Code-specific concept that confused Cursor's and Codex's agents and
   caused them to fall back to native grep even with codegraph available. The
-  new template adds explicit "trust codegraph results, don't re-verify with
-  grep" guidance and a clear tool-by-question matrix. Applies to
+  new template added stronger CodeGraph-first guidance and a clear
+  tool-by-question matrix. Applies to
   `~/.claude/CLAUDE.md`, `.cursor/rules/codegraph.mdc`, and `~/.codex/AGENTS.md`.
 - `codegraph install` prompt order: agent picker is now step 1, before the
   PATH-install and location prompts.

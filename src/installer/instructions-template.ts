@@ -23,11 +23,11 @@ export const CODEGRAPH_SECTION_END = '<!-- CODEGRAPH_END -->';
 export const INSTRUCTIONS_TEMPLATE = `${CODEGRAPH_SECTION_START}
 ## CodeGraph
 
-This project has a CodeGraph MCP server (\`codegraph_*\` tools) configured. CodeGraph is a tree-sitter-parsed knowledge graph of every symbol, edge, and file. Reads are sub-millisecond and return structural information grep cannot.
+This project has a CodeGraph MCP server (\`codegraph_*\` tools) configured. CodeGraph is a tree-sitter-parsed knowledge graph of symbols, edges, and files. Reads are sub-millisecond and return structural context grep cannot.
 
 ### When to prefer codegraph over native search
 
-Use codegraph for **structural** questions — what calls what, what would break, where is X defined, what is X's signature. Use native grep/read only for **literal text** queries (string contents, comments, log messages) or after you already have a specific file open.
+Use codegraph as the **first pass for structural** questions — what calls what, what would break, where is X defined, what is X's signature. Use native grep/read for **literal text** queries (string contents, comments, log messages), exact snippets, or after you already have a specific file open.
 
 | Question | Tool |
 |---|---|
@@ -43,9 +43,9 @@ Use codegraph for **structural** questions — what calls what, what would break
 
 ### Rules of thumb
 
-- **Answer directly — don't delegate exploration.** For "how does X work" / architecture / trace questions, answer with 2-3 codegraph calls: \`codegraph_context\` first, then ONE \`codegraph_explore\` for the source of the symbols it surfaces. Codegraph IS the pre-built index, so spawning a separate file-reading sub-task/agent — or running a grep + read loop — repeats work codegraph already did and costs more for the same answer.
-- **Trust codegraph results.** They come from a full AST parse. Do NOT re-verify them with grep — that's slower, less accurate, and wastes context.
-- **Don't grep first** when looking up a symbol by name. \`codegraph_search\` is faster and returns kind + location + signature in one call.
+- **Answer directly for structural exploration.** For "how does X work" / architecture / trace questions, start with 2-3 codegraph calls: \`codegraph_context\` first, then ONE \`codegraph_explore\` for the source of the symbols it surfaces. This usually gives the right files faster than delegating to another agent or running a broad grep/read sweep.
+- **Verify when it matters.** CodeGraph is a fast structural index, not a source of truth. Confirm with source reads, tests, or typecheck when results are surprising, low-confidence, security/production-sensitive, or before edit-critical conclusions.
+- **Don't grep first for symbol lookup.** When looking up a symbol by name, \`codegraph_search\` is usually faster and returns kind + location + signature in one call. Use grep/read when the target is literal text rather than a symbol.
 - **Don't chain \`codegraph_search\` + \`codegraph_node\`** when you just want context — \`codegraph_context\` is one call.
 - **Don't loop \`codegraph_node\` over many symbols** — one \`codegraph_explore\` call returns several symbols' source grouped in a single capped call, while each separate node/Read call re-reads the whole context and costs far more.
 - **Index lag**: the file watcher debounces ~500ms behind writes; don't re-query immediately after editing a file in the same turn.

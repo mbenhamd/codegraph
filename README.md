@@ -242,8 +242,9 @@ npm install -g @colbymchenry/codegraph
       "mcp__codegraph__codegraph_callees",
       "mcp__codegraph__codegraph_impact",
       "mcp__codegraph__codegraph_node",
-      "mcp__codegraph__codegraph_status",
-      "mcp__codegraph__codegraph_files"
+      "mcp__codegraph__codegraph_explore",
+      "mcp__codegraph__codegraph_files",
+      "mcp__codegraph__codegraph_status"
     ]
   }
 }
@@ -254,40 +255,18 @@ npm install -g @colbymchenry/codegraph
 <details>
 <summary><strong>Global Instructions Reference</strong></summary>
 
-The installer automatically adds these instructions to `~/.claude/CLAUDE.md`:
+The installer automatically adds calibrated CodeGraph guidance to instruction-aware agent surfaces, such as `CLAUDE.md`, `.cursor/rules/codegraph.mdc`, and `AGENTS.md`. Some targets, such as Hermes Agent and global Cursor installs, only receive MCP configuration and rely on MCP server instructions or project-local wiring.
 
 ```markdown
-## CodeGraph
+This project has a CodeGraph MCP server (`codegraph_*` tools) configured. CodeGraph is a tree-sitter-parsed knowledge graph of symbols, edges, and files. Reads are sub-millisecond and return structural context grep cannot.
 
-CodeGraph builds a semantic knowledge graph of codebases for faster, smarter code exploration.
+Use codegraph as the first pass for structural questions: what calls what, what would break, where X is defined, and what X's signature is.
 
-### If `.codegraph/` exists in the project
+Use native grep/read for literal text queries: string contents, comments, log messages, exact snippets, or after you already have a specific file open.
 
-**NEVER call `codegraph_explore` or `codegraph_context` directly in the main session.** These tools return large amounts of source code that fills up main session context. Instead, ALWAYS spawn an Explore agent for any exploration question (e.g., "how does X work?", "explain the Y system", "where is Z implemented?").
+Verify CodeGraph results against source reads, tests, or typecheck when results are surprising, low-confidence, security/production-sensitive, or before edit-critical conclusions.
 
-**When spawning Explore agents**, include this instruction in the prompt:
-
-> This project has CodeGraph initialized (.codegraph/ exists). Use `codegraph_explore` as your PRIMARY tool — it returns full source code sections from all relevant files in one call.
->
-> **Rules:**
-> 1. Follow the explore call budget in the `codegraph_explore` tool description — it scales automatically based on project size.
-> 2. Do NOT re-read files that codegraph_explore already returned source code for. The source sections are complete and authoritative.
-> 3. Only fall back to grep/glob/read for files listed under "Additional relevant files" if you need more detail, or if codegraph returned no results.
-
-**The main session may only use these lightweight tools directly** (for targeted lookups before making edits, not for exploration):
-
-| Tool | Use For |
-|------|---------|
-| `codegraph_search` | Find symbols by name |
-| `codegraph_callers` / `codegraph_callees` | Trace call flow |
-| `codegraph_impact` | Check what's affected before editing |
-| `codegraph_node` | Get a single symbol's details |
-
-### If `.codegraph/` does NOT exist
-
-At the start of a session, ask the user if they'd like to initialize CodeGraph:
-
-"I notice this project doesn't have CodeGraph initialized. Would you like me to run `codegraph init -i` to build a code knowledge graph?"
+If `.codegraph/` does not exist, ask whether to run `codegraph init -i` to build the index.
 ```
 
 </details>
