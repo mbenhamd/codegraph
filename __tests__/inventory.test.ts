@@ -110,7 +110,7 @@ describe('repository inventory', () => {
         path: 'package.json',
         name: '@demo/rewrite-target',
         version: '1.2.3',
-        private: true,
+        npm: { private: true },
         scripts: ['build', 'test'],
         dependencies: ['react'],
         devDependencies: ['typescript'],
@@ -138,11 +138,14 @@ describe('repository inventory', () => {
       path: 'package.json',
       name: '@demo/rewrite-target',
       version: '1.2.3',
-      private: true,
+      npm: { private: true },
       scripts: ['build', 'test'],
       dependencies: ['react'],
       devDependencies: ['typescript'],
     });
+    expect(
+      (inventory.packages.find((pkg) => pkg.path === 'package.json') as { private?: unknown }).private
+    ).toBeUndefined();
     expect(inventory.packages.map((pkg) => pkg.name)).not.toContain('@demo/generated');
     expect(inventory.artifacts).toEqual(
       expect.arrayContaining([
@@ -160,5 +163,53 @@ describe('repository inventory', () => {
     expect(
       inventory.artifacts.some((artifact) => artifact.path.startsWith('generated/'))
     ).toBe(false);
+  });
+
+  it('handles VCS/URL pyproject specs and skips oversized manifests', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-inventory-edge-'));
+    tempDirs.push(dir);
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'noop.ts'), 'export function noop(): void {}\n', 'utf8');
+
+    fs.writeFileSync(
+      path.join(dir, 'pyproject.toml'),
+      [
+        '[project]',
+        'name = "edge"',
+        'version = "0.0.1"',
+        'dependencies = [',
+        '  "fastapi",',
+        '  "named-dep @ https://example.com/named-0.1.tar.gz",',
+        '  "git+https://example.com/repo.git#egg=eggdep",',
+        '  "git+https://example.com/repo.git",',
+        '  "https://example.com/bare.tar.gz",',
+        ']',
+      ].join('\n'),
+      'utf8'
+    );
+
+    fs.writeFileSync(path.join(dir, 'requirements.txt'), 'numpy>=1\ngit+https://example.com/r.git\n', 'utf8');
+
+    fs.mkdirSync(path.join(dir, 'huge'), { recursive: true });
+    const oversized = `{"name":"huge-package","dependencies":{"x":"1"},"padding":"${'A'.repeat(1_100_000)}"}`;
+    fs.writeFileSync(path.join(dir, 'huge', 'package.json'), oversized, 'utf8');
+
+    cg = await CodeGraph.init(dir);
+    await cg.indexAll();
+
+    const inventory = buildRepositoryInventory(cg, dir);
+
+    const py = inventory.packages.find((pkg) => pkg.ecosystem === 'python');
+    expect(py).toBeDefined();
+    expect(py!.dependencies).toEqual(['eggdep', 'fastapi', 'named-dep']);
+
+    const reqs = inventory.packages.find((pkg) => pkg.ecosystem === 'requirements');
+    expect(reqs).toBeDefined();
+    expect(reqs!.dependencies).toEqual(['numpy']);
+
+    const huge = inventory.packages.find((pkg) => pkg.path === 'huge/package.json');
+    expect(huge).toBeDefined();
+    expect(huge!.name).toBeUndefined();
+    expect(huge!.dependencies).toEqual([]);
   });
 });
