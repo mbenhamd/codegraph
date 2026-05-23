@@ -846,4 +846,77 @@ def bootstrap():
       expect(callers.some((c) => c.node.filePath === 'src/main.ts')).toBe(true);
     });
   });
+
+  describe('exported wrapper callback call graphs', () => {
+    it('links calls from an exported wrapper callback constant to its callback callees', async () => {
+      fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'src/actions.ts'),
+        `
+export function persist(): void {}
+export function buildConfig(): { retries: number } {
+  return { retries: 3 };
+}
+function withTx<T extends (...args: any[]) => any>(fn: T): T { return fn; }
+function withDefaults<T>(fn: () => T): T { return fn(); }
+
+export const save = withTx(async () => {
+  await persist();
+});
+
+export const config = withTx({
+  persist,
+  retries: 3,
+});
+
+export const data = withDefaults(() => buildConfig());
+`
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      const persistNode = cg
+        .getNodesByKind('function')
+        .find((n) => n.name === 'persist' && n.filePath === 'src/actions.ts');
+      expect(persistNode).toBeDefined();
+
+      const saveNode = cg
+        .getNodesByKind('function')
+        .find((n) => n.name === 'save' && n.filePath === 'src/actions.ts');
+      expect(saveNode).toBeDefined();
+
+      const configNode = cg.getNodesByKind('constant').find((n) => n.name === 'config');
+      expect(configNode).toBeDefined();
+
+      const dataNode = cg.getNodesByKind('constant').find((n) => n.name === 'data');
+      expect(dataNode).toBeDefined();
+
+      const withTxNode = cg
+        .getNodesByKind('function')
+        .find((n) => n.name === 'withTx' && n.filePath === 'src/actions.ts');
+      expect(withTxNode).toBeDefined();
+
+      const buildConfigNode = cg
+        .getNodesByKind('function')
+        .find((n) => n.name === 'buildConfig' && n.filePath === 'src/actions.ts');
+      expect(buildConfigNode).toBeDefined();
+
+      const callers = cg.getCallers(persistNode!.id);
+      expect(callers.some((c) => c.node.id === saveNode!.id)).toBe(true);
+      expect(callers.some((c) => c.node.id === configNode!.id)).toBe(false);
+      expect(callers.some((c) => c.node.id === dataNode!.id)).toBe(false);
+
+      const impact = cg.getImpactRadius(persistNode!.id, 2);
+      expect(impact.nodes.has(saveNode!.id)).toBe(true);
+      expect(impact.nodes.has(configNode!.id)).toBe(false);
+      expect(impact.nodes.has(dataNode!.id)).toBe(false);
+
+      const wrapperImpact = cg.getImpactRadius(withTxNode!.id, 1);
+      expect(wrapperImpact.nodes.has(saveNode!.id)).toBe(true);
+
+      const dataFactoryImpact = cg.getImpactRadius(buildConfigNode!.id, 2);
+      expect(dataFactoryImpact.nodes.has(dataNode!.id)).toBe(false);
+    });
+  });
 });
