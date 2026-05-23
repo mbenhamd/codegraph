@@ -19,7 +19,8 @@ import { QueryBuilder } from '../db/queries';
 import { extractFromSource } from './tree-sitter';
 import { detectLanguage, isSourceFile, isLanguageSupported, initGrammars, loadGrammarsForLanguages } from './grammars';
 import { logDebug, logWarn } from '../errors';
-import { validatePathWithinRoot, normalizePath } from '../utils';
+import { validatePathWithinRoot, normalizePath, isPathWithinRootReal } from '../utils';
+import { getCodeGraphDir } from '../directory';
 import ignore, { Ignore } from 'ignore';
 import { detectFrameworks } from '../resolution/frameworks';
 import type { ResolutionContext } from '../resolution/types';
@@ -72,6 +73,19 @@ export interface IndexResult {
   durationMs: number;
 }
 
+export type SensitiveSkipReason = 'env-file' | 'key-file' | 'secret-like-source';
+export type IndexPathSkipReason = SensitiveSkipReason | 'gitignored';
+
+export interface ScanSafetyStats {
+  sensitiveFilesSkipped: number;
+  sensitiveFilesByReason: Partial<Record<SensitiveSkipReason, number>>;
+}
+
+export interface ScanDirectoryResult {
+  files: string[];
+  safety: ScanSafetyStats;
+}
+
 /**
  * Result of a sync operation
  */
@@ -98,6 +112,517 @@ export function hashContent(content: string): string {
  * symbols. 1 MB covers essentially all hand-written source.
  */
 const MAX_FILE_SIZE = 1024 * 1024;
+const INDEX_SAFETY_STATS_METADATA_KEY = 'indexSafetyStats';
+
+const PRIVATE_KEY_BASENAMES = new Set([
+  'id_rsa',
+  'id_dsa',
+  'id_ecdsa',
+  'id_ed25519',
+  'identity',
+]);
+
+const KEY_FILE_EXTENSIONS = new Set([
+  '.key',
+  '.pem',
+  '.p8',
+  '.p12',
+  '.pfx',
+]);
+
+const SECRET_LIKE_SOURCE_BASENAME = /(^|[._-])(secret|secrets|credential|credentials|api[._-]?key|private[._-]?key)([._-]|$)/i;
+
+function emptyScanSafetyStats(): ScanSafetyStats {
+  return {
+    sensitiveFilesSkipped: 0,
+    sensitiveFilesByReason: {},
+  };
+}
+
+function recordSensitiveSkip(stats: ScanSafetyStats, reason: SensitiveSkipReason): void {
+  stats.sensitiveFilesSkipped++;
+  stats.sensitiveFilesByReason[reason] = (stats.sensitiveFilesByReason[reason] ?? 0) + 1;
+}
+
+function cloneScanSafetyStats(stats: ScanSafetyStats): ScanSafetyStats {
+  return {
+    sensitiveFilesSkipped: stats.sensitiveFilesSkipped,
+    sensitiveFilesByReason: { ...stats.sensitiveFilesByReason },
+  };
+}
+
+function parseStoredScanSafetyStats(raw: string | null): ScanSafetyStats {
+  if (!raw) return emptyScanSafetyStats();
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<ScanSafetyStats>;
+    const byReason: Partial<Record<SensitiveSkipReason, number>> = {};
+    for (const reason of ['env-file', 'key-file', 'secret-like-source'] as const) {
+      const value = parsed.sensitiveFilesByReason?.[reason];
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+        byReason[reason] = value;
+      }
+    }
+
+    const total = typeof parsed.sensitiveFilesSkipped === 'number' && Number.isFinite(parsed.sensitiveFilesSkipped) && parsed.sensitiveFilesSkipped >= 0
+      ? parsed.sensitiveFilesSkipped
+      : Object.values(byReason).reduce((sum, count) => sum + (count ?? 0), 0);
+
+    return {
+      sensitiveFilesSkipped: total,
+      sensitiveFilesByReason: byReason,
+    };
+  } catch {
+    return emptyScanSafetyStats();
+  }
+}
+
+interface IgnoreRule {
+  negated: boolean;
+  matcher: Ignore;
+}
+
+interface ScopedIgnore {
+  dir: string;
+  rules: IgnoreRule[];
+}
+
+function loadScopedIgnore(dir: string): ScopedIgnore | null {
+  try {
+    const giPath = path.join(dir, '.gitignore');
+    if (!fs.existsSync(giPath)) return null;
+
+    const rules: IgnoreRule[] = [];
+    for (const line of fs.readFileSync(giPath, 'utf-8').split(/\r?\n/)) {
+      if (!line || line.startsWith('#')) continue;
+      const negated = line.startsWith('!') && line.length > 1;
+      const pattern = negated ? line.slice(1) : line;
+      rules.push({ negated, matcher: ignore().add(pattern) });
+    }
+    return { dir, rules };
+  } catch {
+    // Unreadable .gitignore — treat as absent.
+    return null;
+  }
+}
+
+function isIgnoredByScopedIgnores(fullPath: string, isDir: boolean, matchers: ScopedIgnore[]): boolean {
+  let ignored = false;
+  for (const { dir, rules } of matchers) {
+    let rel = normalizePath(path.relative(dir, fullPath));
+    if (!rel || rel.startsWith('..')) continue; // not under this matcher's dir
+    if (isDir) rel += '/'; // dir-only rules (e.g. `build/`) only match with the slash
+    for (const rule of rules) {
+      if (rule.matcher.ignores(rel)) {
+        ignored = !rule.negated;
+      }
+    }
+  }
+  return ignored;
+}
+
+function getGitIgnoredPaths(repoDir: string, filePaths: string[]): Set<string> {
+  if (filePaths.length === 0) return new Set();
+
+  try {
+    const output = execFileSync(
+      'git',
+      ['check-ignore', '--no-index', '-z', '--stdin'],
+      {
+        cwd: repoDir,
+        input: Buffer.from(filePaths.join('\0') + '\0', 'utf-8'),
+        timeout: 30000,
+        maxBuffer: 50 * 1024 * 1024,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }
+    );
+
+    return new Set(
+      output
+        .toString('utf-8')
+        .split('\0')
+        .filter(Boolean)
+        .map(normalizePath)
+    );
+  } catch {
+    // git check-ignore exits 1 when no paths match. Other failures should not
+    // make indexing unusable, so callers fall back to the existing visible set.
+    return new Set();
+  }
+}
+
+function collectGitIgnoreFilePaths(repoDir: string, prefix: string, files: Set<string>, visitedRepos = new Set<string>()): boolean {
+  let realRepoDir: string;
+  try {
+    realRepoDir = fs.realpathSync(repoDir);
+  } catch {
+    return false;
+  }
+  if (visitedRepos.has(realRepoDir)) return true;
+  visitedRepos.add(realRepoDir);
+
+  const gitOpts = { cwd: repoDir, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+
+  try {
+    const output = execFileSync('git', ['ls-files', '-c', '-o', '--exclude-standard', '--', '.gitignore', ':(glob)**/.gitignore'], gitOpts);
+    for (const line of output.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed) files.add(normalizePath(prefix + trimmed));
+    }
+
+    const untracked = execFileSync('git', ['ls-files', '-o', '--exclude-standard'], gitOpts);
+    const ignoredDirs = execFileSync('git', ['ls-files', '-o', '-i', '--exclude-standard', '--directory'], gitOpts);
+    for (const line of `${untracked}\n${ignoredDirs}`.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.endsWith('/')) continue;
+
+      const childDir = path.join(repoDir, trimmed);
+      if (fs.existsSync(path.join(childDir, '.git'))) {
+        collectGitIgnoreFilePaths(childDir, prefix + trimmed, files, visitedRepos);
+      }
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getIgnoreFilePaths(rootDir: string): string[] {
+  const gitFiles = new Set<string>();
+  if (collectGitIgnoreFilePaths(rootDir, '', gitFiles)) {
+    for (const filePath of getAncestorGitIgnoreFilePaths(rootDir)) {
+      gitFiles.add(filePath);
+    }
+    return [...gitFiles];
+  }
+
+  const files: string[] = [];
+
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.name === '.git' || entry.name === '.codegraph') continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(fullPath);
+      } else if (entry.isFile() && entry.name === '.gitignore') {
+        files.push(normalizePath(path.relative(rootDir, fullPath)));
+      }
+    }
+  };
+
+  walk(rootDir);
+  return files;
+}
+
+function getAncestorGitIgnoreFilePaths(rootDir: string): string[] {
+  const files: string[] = [];
+  try {
+    const gitRoot = execFileSync(
+      'git',
+      ['rev-parse', '--show-toplevel'],
+      { cwd: rootDir, encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+    const resolvedRoot = path.resolve(rootDir);
+    const resolvedGitRoot = path.resolve(gitRoot);
+    if (resolvedGitRoot === resolvedRoot) return files;
+
+    let current = resolvedRoot;
+    while (current !== resolvedGitRoot) {
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      const relToGitRoot = path.relative(resolvedGitRoot, parent);
+      if (relToGitRoot.startsWith('..') || path.isAbsolute(relToGitRoot)) break;
+
+      const gitignorePath = path.join(parent, '.gitignore');
+      if (fs.existsSync(gitignorePath)) {
+        files.push(normalizePath(path.relative(rootDir, gitignorePath)));
+      }
+      current = parent;
+    }
+  } catch {
+    // No enclosing git root; local .gitignore files are enough.
+  }
+
+  return files;
+}
+
+function getIgnoreFingerprint(rootDir: string): string {
+  return getIgnoreFilePaths(rootDir)
+    .sort()
+    .map((filePath) => {
+      try {
+        const content = fs.readFileSync(path.join(rootDir, filePath));
+        const hash = crypto.createHash('sha256').update(content).digest('hex');
+        return `${filePath}:${hash}`;
+      } catch {
+        return `${filePath}:missing`;
+      }
+    })
+    .join('|');
+}
+
+function getIgnoreFingerprintPath(rootDir: string): string {
+  return path.join(getCodeGraphDir(rootDir), 'ignore-fingerprint');
+}
+
+function readStoredIgnoreFingerprint(rootDir: string): string {
+  try {
+    return fs.readFileSync(getIgnoreFingerprintPath(rootDir), 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+function writeStoredIgnoreFingerprint(rootDir: string, fingerprint: string): void {
+  try {
+    fs.writeFileSync(getIgnoreFingerprintPath(rootDir), fingerprint, 'utf-8');
+  } catch {
+    // Fingerprint persistence is an optimization for incremental sync. If it
+    // fails, the in-memory value still keeps the current process correct.
+  }
+}
+
+/**
+ * Conservative path-only safety filter for files that commonly contain raw
+ * credentials. This intentionally does not inspect contents, so status output
+ * can report aggregate skip counts without leaking secrets.
+ */
+export function getSensitiveSkipReason(filePath: string): SensitiveSkipReason | null {
+  const normalized = normalizePath(filePath);
+  const base = path.posix.basename(normalized).toLowerCase();
+  const ext = path.posix.extname(base);
+
+  if (base === '.env' || base.startsWith('.env.')) {
+    return 'env-file';
+  }
+
+  if (PRIVATE_KEY_BASENAMES.has(base) || KEY_FILE_EXTENSIONS.has(ext) || /\.(key|pem|p8|p12|pfx)\./i.test(base)) {
+    return 'key-file';
+  }
+
+  if (isSourceFile(normalized) && SECRET_LIKE_SOURCE_BASENAME.test(base)) {
+    return 'secret-like-source';
+  }
+
+  return null;
+}
+
+export function isSensitivePath(filePath: string): boolean {
+  return getSensitiveSkipReason(filePath) !== null;
+}
+
+function isIgnoredByIgnoreFiles(rootDir: string, relativePath: string): boolean {
+  const normalized = normalizePath(
+    path.isAbsolute(relativePath)
+      ? path.relative(rootDir, relativePath)
+      : relativePath
+  );
+  const fullPath = path.resolve(rootDir, normalized);
+  const parent = normalizePath(path.dirname(normalized));
+  const dirs = [''];
+
+  if (parent !== '.') {
+    const parts = parent.split('/').filter(Boolean);
+    let acc = '';
+    for (const part of parts) {
+      acc = acc ? `${acc}/${part}` : part;
+      dirs.push(acc);
+    }
+  }
+
+  const matchers: ScopedIgnore[] = [];
+  for (const dirRel of dirs) {
+    const dir = path.join(rootDir, dirRel);
+    const matcher = loadScopedIgnore(dir);
+    if (matcher) matchers.push(matcher);
+  }
+
+  const parentParts = parent === '.' ? [] : parent.split('/').filter(Boolean);
+  let ancestor = '';
+  for (const part of parentParts) {
+    ancestor = ancestor ? `${ancestor}/${part}` : part;
+    if (isIgnoredByScopedIgnores(path.resolve(rootDir, ancestor), true, matchers)) {
+      return true;
+    }
+  }
+
+  return isIgnoredByScopedIgnores(fullPath, false, matchers);
+}
+
+function getRealProjectRelativePath(rootDir: string, relativePath: string): string | null {
+  const fullPath = validatePathWithinRoot(rootDir, relativePath);
+  if (!fullPath) return null;
+
+  try {
+    const realRoot = fs.realpathSync(rootDir);
+    const realPath = fs.realpathSync(fullPath);
+    const rel = path.relative(realRoot, realPath);
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    return normalizePath(rel);
+  } catch {
+    return null;
+  }
+}
+
+function getGitRootFromMarkers(rootDir: string, fullPath: string): string | null {
+  const resolvedRoot = path.resolve(rootDir);
+  let current: string;
+
+  try {
+    const stat = fs.statSync(fullPath);
+    current = stat.isDirectory() ? fullPath : path.dirname(fullPath);
+  } catch {
+    current = path.dirname(fullPath);
+  }
+
+  current = path.resolve(current);
+  while (current === resolvedRoot || current.startsWith(resolvedRoot + path.sep)) {
+    if (fs.existsSync(path.join(current, '.git'))) {
+      return current;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+
+  return null;
+}
+
+function hasGitRootMarker(rootDir: string): boolean {
+  return fs.existsSync(path.join(rootDir, '.git'));
+}
+
+const visibleAncestorGitRootCache = new Map<string, { fingerprint: string; visible: boolean }>();
+
+function getAncestorIgnoreFingerprint(rootDir: string, gitRoot: string): string {
+  const paths = getAncestorGitIgnoreFilePaths(rootDir)
+    .map((filePath) => path.resolve(rootDir, filePath));
+  const gitInfoExclude = path.join(gitRoot, '.git', 'info', 'exclude');
+  if (fs.existsSync(gitInfoExclude)) {
+    paths.push(gitInfoExclude);
+  }
+
+  return paths
+    .sort()
+    .map((filePath) => {
+      try {
+        const content = fs.readFileSync(filePath);
+        const hash = crypto.createHash('sha256').update(content).digest('hex');
+        return `${filePath}:${hash}`;
+      } catch {
+        return `${filePath}:missing`;
+      }
+    })
+    .join('|');
+}
+
+function hasVisibleAncestorGitRoot(rootDir: string): boolean {
+  const resolvedRoot = path.resolve(rootDir);
+
+  let result = false;
+  try {
+    const gitRoot = execFileSync(
+      'git',
+      ['rev-parse', '--show-toplevel'],
+      { cwd: rootDir, encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+    const resolvedGitRoot = path.resolve(gitRoot);
+    if (resolvedGitRoot === resolvedRoot || resolvedGitRoot.startsWith(resolvedRoot + path.sep)) {
+      visibleAncestorGitRootCache.set(resolvedRoot, { fingerprint: '', visible: false });
+      return false;
+    }
+
+    const fingerprint = getAncestorIgnoreFingerprint(rootDir, resolvedGitRoot);
+    const cached = visibleAncestorGitRootCache.get(resolvedRoot);
+    if (cached?.fingerprint === fingerprint) return cached.visible;
+
+    try {
+      execFileSync(
+        'git',
+        ['check-ignore', '-q', resolvedRoot],
+        { cwd: rootDir, encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }
+      );
+      result = false;
+    } catch {
+      result = true;
+    }
+    visibleAncestorGitRootCache.set(resolvedRoot, { fingerprint, visible: result });
+  } catch {
+    result = false;
+    visibleAncestorGitRootCache.set(resolvedRoot, { fingerprint: '', visible: result });
+  }
+
+  return result;
+}
+
+function getIgnoreContext(rootDir: string, relativePath: string): { rootDir: string; relativePath: string } {
+  const fullPath = validatePathWithinRoot(rootDir, relativePath);
+  if (!fullPath) return { rootDir, relativePath };
+
+  const markerRoot = getGitRootFromMarkers(rootDir, fullPath);
+  if (markerRoot) {
+    return {
+      rootDir: markerRoot,
+      relativePath: normalizePath(path.relative(markerRoot, fullPath)),
+    };
+  }
+
+  return { rootDir, relativePath };
+}
+
+function getIndexPathCandidates(rootDir: string, relativePath: string): string[] {
+  const fullPath = validatePathWithinRoot(rootDir, relativePath);
+  const projectRelativePath = fullPath
+    ? normalizePath(path.relative(rootDir, fullPath))
+    : normalizePath(relativePath);
+  const realProjectRelativePath = getRealProjectRelativePath(rootDir, relativePath);
+  const candidatePaths = [projectRelativePath];
+  if (realProjectRelativePath && realProjectRelativePath !== projectRelativePath) {
+    candidatePaths.push(realProjectRelativePath);
+  }
+  return candidatePaths;
+}
+
+export function getIndexPathSkipReason(rootDir: string, relativePath: string): IndexPathSkipReason | null {
+  const candidatePaths = getIndexPathCandidates(rootDir, relativePath);
+  for (const candidatePath of candidatePaths) {
+    const sensitiveReason = getSensitiveSkipReason(candidatePath);
+    if (sensitiveReason) return sensitiveReason;
+  }
+
+  for (const candidatePath of candidatePaths) {
+    const ignoreContext = getIgnoreContext(rootDir, candidatePath);
+    if (!hasGitRootMarker(ignoreContext.rootDir) && !hasVisibleAncestorGitRoot(ignoreContext.rootDir)) continue;
+
+    try {
+      execFileSync(
+        'git',
+        ['check-ignore', '--no-index', '-q', '--', ignoreContext.relativePath],
+        { cwd: ignoreContext.rootDir, encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }
+      );
+      return 'gitignored';
+    } catch {
+      // Either not ignored, not a git repo, or git unavailable. Fall back to
+      // parsing .gitignore files directly so non-git projects behave the same.
+    }
+  }
+
+  return candidatePaths.some((candidatePath) => {
+    const ignoreContext = getIgnoreContext(rootDir, candidatePath);
+    return isIgnoredByIgnoreFiles(ignoreContext.rootDir, ignoreContext.relativePath);
+  })
+    ? 'gitignored'
+    : null;
+}
 
 /**
  * Collect git-visible files (tracked + untracked, .gitignore-respected) from the
@@ -112,7 +637,16 @@ const MAX_FILE_SIZE = 1024 * 1024;
  * embedded repo is its own git boundary, so we re-run `git ls-files` inside it.
  * (See issue #193.)
  */
-function collectGitFiles(repoDir: string, prefix: string, files: Set<string>): void {
+function collectGitFiles(repoDir: string, prefix: string, files: Set<string>, visitedRepos = new Set<string>()): void {
+  let realRepoDir: string;
+  try {
+    realRepoDir = fs.realpathSync(repoDir);
+  } catch {
+    return;
+  }
+  if (visitedRepos.has(realRepoDir)) return;
+  visitedRepos.add(realRepoDir);
+
   const gitOpts = { cwd: repoDir, encoding: 'utf-8' as const, timeout: 30000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
 
   // Tracked files. --recurse-submodules pulls in files from active submodules,
@@ -121,10 +655,20 @@ function collectGitFiles(repoDir: string, prefix: string, files: Set<string>): v
   // Note: --recurse-submodules only supports -c/--cached and --stage modes — it
   // can't be combined with -o, so untracked files are gathered separately below.
   const tracked = execFileSync('git', ['ls-files', '-c', '--recurse-submodules'], gitOpts);
-  for (const line of tracked.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed) {
-      files.add(normalizePath(prefix + trimmed));
+  const trackedPaths = tracked.split('\n').map((line) => line.trim()).filter(Boolean);
+  const trackedByIgnoreRoot = new Map<string, { originalPath: string; ignorePath: string }[]>();
+  for (const trimmed of trackedPaths) {
+    const context = getIgnoreContext(repoDir, trimmed);
+    const entries = trackedByIgnoreRoot.get(context.rootDir) ?? [];
+    entries.push({ originalPath: trimmed, ignorePath: context.relativePath });
+    trackedByIgnoreRoot.set(context.rootDir, entries);
+  }
+
+  for (const [ignoreRoot, entries] of trackedByIgnoreRoot) {
+    const ignoredTracked = getGitIgnoredPaths(ignoreRoot, entries.map((entry) => entry.ignorePath));
+    for (const entry of entries) {
+      if (ignoredTracked.has(normalizePath(entry.ignorePath))) continue;
+      files.add(normalizePath(prefix + entry.originalPath));
     }
   }
 
@@ -141,11 +685,25 @@ function collectGitFiles(repoDir: string, prefix: string, files: Set<string>): v
       // itself skips it (we never descend into a non-repo opaque dir).
       const childDir = path.join(repoDir, trimmed);
       if (fs.existsSync(path.join(childDir, '.git'))) {
-        collectGitFiles(childDir, prefix + trimmed, files);
+        collectGitFiles(childDir, prefix + trimmed, files, visitedRepos);
       }
       continue;
     }
     files.add(normalizePath(prefix + trimmed));
+  }
+
+  // If a parent .gitignore excludes the embedded repo directory itself, git
+  // reports it only through the ignored-directory listing. The child repo still
+  // owns its own tracked files, so recurse into those git boundaries as well.
+  const ignoredDirs = execFileSync('git', ['ls-files', '-o', '-i', '--exclude-standard', '--directory'], gitOpts);
+  for (const line of ignoredDirs.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.endsWith('/')) continue;
+
+    const childDir = path.join(repoDir, trimmed);
+    if (fs.existsSync(path.join(childDir, '.git'))) {
+      collectGitFiles(childDir, prefix + trimmed, files, visitedRepos);
+    }
   }
 }
 
@@ -198,6 +756,70 @@ interface GitChanges {
   modified: string[];  // M, MM, AM — files to re-hash + re-index
   added: string[];     // ?? — new untracked files to index
   deleted: string[];   // D — files to remove from DB
+  ignoreFilesChanged: boolean; // .gitignore changes require a full visibility rescan
+}
+
+function collectNestedGitChanges(
+  rootDir: string,
+  repoDir: string,
+  prefix: string,
+  changes: GitChanges,
+  visitedRepos = new Set<string>()
+): void {
+  let realRepoDir: string;
+  try {
+    realRepoDir = fs.realpathSync(repoDir);
+  } catch {
+    return;
+  }
+  if (visitedRepos.has(realRepoDir)) return;
+  visitedRepos.add(realRepoDir);
+
+  const gitOpts = { cwd: repoDir, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const output = execFileSync('git', ['status', '--porcelain=v1', '-z', '--no-renames'], gitOpts);
+
+  for (const entry of output.split('\0')) {
+    if (entry.length < 4) continue; // Minimum: "XY file"
+
+    const statusCode = entry.substring(0, 2);
+    const filePath = normalizePath(entry.substring(3));
+    const projectPath = normalizePath(prefix + filePath);
+
+    if (filePath === '.gitignore' || filePath.endsWith('/.gitignore')) {
+      changes.ignoreFilesChanged = true;
+      continue;
+    }
+
+    if (statusCode.includes('D')) {
+      changes.deleted.push(projectPath);
+    } else if (!isPathWithinRootReal(projectPath, rootDir)) {
+      continue;
+    } else if (getIndexPathSkipReason(rootDir, projectPath) || !isSourceFile(projectPath)) {
+      // Skip non-source, gitignored, and sensitive files. Deleted files are
+      // handled first so previously indexed now-excluded files can be purged.
+      continue;
+    } else if (statusCode === '??') {
+      changes.added.push(projectPath);
+    } else {
+      // M, MM, AM, A (staged), etc. — treat as modified
+      changes.modified.push(projectPath);
+    }
+  }
+
+  // Match the git boundary discovery used by collectGitFiles(): visible
+  // embedded repos appear as untracked trailing-slash entries, while repos
+  // hidden by a parent .gitignore appear only in the ignored-directory list.
+  const untracked = execFileSync('git', ['ls-files', '-o', '--exclude-standard'], gitOpts);
+  const ignoredDirs = execFileSync('git', ['ls-files', '-o', '-i', '--exclude-standard', '--directory'], gitOpts);
+  for (const line of `${untracked}\n${ignoredDirs}`.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.endsWith('/')) continue;
+
+    const childDir = path.join(repoDir, trimmed);
+    if (fs.existsSync(path.join(childDir, '.git'))) {
+      collectNestedGitChanges(rootDir, childDir, normalizePath(prefix + trimmed), changes, visitedRepos);
+    }
+  }
 }
 
 /**
@@ -206,36 +828,14 @@ interface GitChanges {
  */
 function getGitChangedFiles(rootDir: string): GitChanges | null {
   try {
-    const output = execFileSync(
-      'git',
-      ['status', '--porcelain', '--no-renames'],
-      { cwd: rootDir, encoding: 'utf-8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] }
-    );
-
-    const modified: string[] = [];
-    const added: string[] = [];
-    const deleted: string[] = [];
-
-    for (const line of output.split('\n')) {
-      if (line.length < 4) continue; // Minimum: "XY file"
-
-      const statusCode = line.substring(0, 2);
-      const filePath = normalizePath(line.substring(3));
-
-      // Skip non-source files (git status already omits .gitignored paths).
-      if (!isSourceFile(filePath)) continue;
-
-      if (statusCode === '??') {
-        added.push(filePath);
-      } else if (statusCode.includes('D')) {
-        deleted.push(filePath);
-      } else {
-        // M, MM, AM, A (staged), etc. — treat as modified
-        modified.push(filePath);
-      }
-    }
-
-    return { modified, added, deleted };
+    const changes: GitChanges = {
+      modified: [],
+      added: [],
+      deleted: [],
+      ignoreFilesChanged: false,
+    };
+    collectNestedGitChanges(rootDir, rootDir, '', changes);
+    return changes;
   } catch {
     return null;
   }
@@ -252,23 +852,50 @@ export function scanDirectory(
   rootDir: string,
   onProgress?: (current: number, file: string) => void
 ): string[] {
+  return scanDirectoryWithStats(rootDir, onProgress).files;
+}
+
+export function scanDirectoryWithStats(
+  rootDir: string,
+  onProgress?: (current: number, file: string) => void
+): ScanDirectoryResult {
+  const safety = emptyScanSafetyStats();
+
   // Fast path: use git to get all visible files (respects .gitignore everywhere)
   const gitFiles = getGitVisibleFiles(rootDir);
   if (gitFiles) {
     const files: string[] = [];
     let count = 0;
+    const candidatePathsByFile = new Map<string, string[]>();
     for (const filePath of gitFiles) {
+      if (!isPathWithinRootReal(filePath, rootDir)) continue;
+      const candidatePaths = getIndexPathCandidates(rootDir, filePath);
+      candidatePathsByFile.set(filePath, candidatePaths);
+    }
+    for (const filePath of gitFiles) {
+      const candidatePaths = candidatePathsByFile.get(filePath) ?? [filePath];
+      if (!candidatePathsByFile.has(filePath)) continue;
+      const sensitiveReason = candidatePaths
+        .map((candidatePath) => getSensitiveSkipReason(candidatePath))
+        .find((reason): reason is SensitiveSkipReason => reason !== null);
+      if (sensitiveReason) {
+        recordSensitiveSkip(safety, sensitiveReason);
+        continue;
+      }
+      if (candidatePaths.slice(1).some((candidatePath) => getIndexPathSkipReason(rootDir, candidatePath) === 'gitignored')) {
+        continue;
+      }
       if (isSourceFile(filePath)) {
         files.push(filePath);
         count++;
         onProgress?.(count, filePath);
       }
     }
-    return files;
+    return { files, safety };
   }
 
   // Fallback: walk filesystem for non-git projects
-  return scanDirectoryWalk(rootDir, onProgress);
+  return scanDirectoryWalk(rootDir, onProgress, safety);
 }
 
 /**
@@ -279,11 +906,37 @@ export async function scanDirectoryAsync(
   rootDir: string,
   onProgress?: (current: number, file: string) => void
 ): Promise<string[]> {
+  return (await scanDirectoryAsyncWithStats(rootDir, onProgress)).files;
+}
+
+export async function scanDirectoryAsyncWithStats(
+  rootDir: string,
+  onProgress?: (current: number, file: string) => void
+): Promise<ScanDirectoryResult> {
+  const safety = emptyScanSafetyStats();
   const gitFiles = getGitVisibleFiles(rootDir);
   if (gitFiles) {
     const files: string[] = [];
     let count = 0;
+    const candidatePathsByFile = new Map<string, string[]>();
     for (const filePath of gitFiles) {
+      if (!isPathWithinRootReal(filePath, rootDir)) continue;
+      const candidatePaths = getIndexPathCandidates(rootDir, filePath);
+      candidatePathsByFile.set(filePath, candidatePaths);
+    }
+    for (const filePath of gitFiles) {
+      const candidatePaths = candidatePathsByFile.get(filePath) ?? [filePath];
+      if (!candidatePathsByFile.has(filePath)) continue;
+      const sensitiveReason = candidatePaths
+        .map((candidatePath) => getSensitiveSkipReason(candidatePath))
+        .find((reason): reason is SensitiveSkipReason => reason !== null);
+      if (sensitiveReason) {
+        recordSensitiveSkip(safety, sensitiveReason);
+        continue;
+      }
+      if (candidatePaths.slice(1).some((candidatePath) => getIndexPathSkipReason(rootDir, candidatePath) === 'gitignored')) {
+        continue;
+      }
       if (isSourceFile(filePath)) {
         files.push(filePath);
         count++;
@@ -294,10 +947,14 @@ export async function scanDirectoryAsync(
         }
       }
     }
-    return files;
+    return { files, safety };
   }
 
-  return scanDirectoryWalk(rootDir, onProgress);
+  return scanDirectoryWalk(rootDir, onProgress, safety);
+}
+
+export function getScanSafetyStats(rootDir: string): ScanSafetyStats {
+  return scanDirectoryWithStats(rootDir).safety;
 }
 
 /**
@@ -305,41 +962,24 @@ export async function scanDirectoryAsync(
  */
 function scanDirectoryWalk(
   rootDir: string,
-  onProgress?: (current: number, file: string) => void
-): string[] {
+  onProgress: ((current: number, file: string) => void) | undefined,
+  safety: ScanSafetyStats
+): ScanDirectoryResult {
   const files: string[] = [];
   let count = 0;
   const visitedDirs = new Set<string>();
+  let realRoot: string;
 
-  // A .gitignore matcher scoped to the directory that declared it. Patterns in
-  // a nested .gitignore are relative to that directory, so we keep the dir
-  // alongside the matcher and test paths relative to it — mirroring how git
-  // applies .gitignore files at every level.
-  interface ScopedIgnore {
-    dir: string;
-    ig: Ignore;
+  try {
+    realRoot = fs.realpathSync(rootDir);
+  } catch {
+    logDebug('Skipping unresolvable scan root', { rootDir });
+    return { files, safety };
   }
 
-  const loadIgnore = (dir: string): ScopedIgnore | null => {
-    try {
-      const giPath = path.join(dir, '.gitignore');
-      if (fs.existsSync(giPath)) {
-        return { dir, ig: ignore().add(fs.readFileSync(giPath, 'utf-8')) };
-      }
-    } catch {
-      // Unreadable .gitignore — treat as absent.
-    }
-    return null;
-  };
-
-  const isIgnored = (fullPath: string, isDir: boolean, matchers: ScopedIgnore[]): boolean => {
-    for (const { dir, ig } of matchers) {
-      let rel = normalizePath(path.relative(dir, fullPath));
-      if (!rel || rel.startsWith('..')) continue; // not under this matcher's dir
-      if (isDir) rel += '/'; // dir-only rules (e.g. `build/`) only match with the slash
-      if (ig.ignores(rel)) return true;
-    }
-    return false;
+  const isWithinRealRoot = (realPath: string): boolean => {
+    const rel = path.relative(realRoot, realPath);
+    return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
   };
 
   function walk(dir: string, matchers: ScopedIgnore[]): void {
@@ -355,10 +995,14 @@ function scanDirectoryWalk(
       logDebug('Skipping already-visited directory (symlink cycle)', { dir, realDir });
       return;
     }
+    if (!isWithinRealRoot(realDir)) {
+      logDebug('Skipping directory outside scan root', { dir, realDir });
+      return;
+    }
     visitedDirs.add(realDir);
 
     // This directory's own .gitignore (if present) applies to everything below it.
-    const own = loadIgnore(dir);
+    const own = loadScopedIgnore(dir);
     const active = own ? [...matchers, own] : matchers;
 
     let entries: fs.Dirent[];
@@ -379,13 +1023,20 @@ function scanDirectoryWalk(
       if (entry.isSymbolicLink()) {
         try {
           const realTarget = fs.realpathSync(fullPath);
+          if (!isWithinRealRoot(realTarget)) {
+            logDebug('Skipping symlink outside scan root', { path: fullPath, realTarget });
+            continue;
+          }
           const stat = fs.statSync(realTarget);
           if (stat.isDirectory()) {
-            if (!isIgnored(fullPath, true, active)) {
+            if (!isIgnoredByScopedIgnores(fullPath, true, active) && !isIgnoredByScopedIgnores(realTarget, true, active)) {
               walk(fullPath, active);
             }
           } else if (stat.isFile()) {
-            if (!isIgnored(fullPath, false, active) && isSourceFile(relativePath)) {
+            const skipReason = getIndexPathSkipReason(rootDir, relativePath);
+            if (!isIgnoredByScopedIgnores(fullPath, false, active) && skipReason && skipReason !== 'gitignored') {
+              recordSensitiveSkip(safety, skipReason);
+            } else if (!isIgnoredByScopedIgnores(fullPath, false, active) && !skipReason && isSourceFile(relativePath)) {
               files.push(relativePath);
               count++;
               onProgress?.(count, relativePath);
@@ -398,11 +1049,14 @@ function scanDirectoryWalk(
       }
 
       if (entry.isDirectory()) {
-        if (!isIgnored(fullPath, true, active)) {
+        if (!isIgnoredByScopedIgnores(fullPath, true, active)) {
           walk(fullPath, active);
         }
       } else if (entry.isFile()) {
-        if (!isIgnored(fullPath, false, active) && isSourceFile(relativePath)) {
+        const skipReason = getIndexPathSkipReason(rootDir, relativePath);
+        if (!isIgnoredByScopedIgnores(fullPath, false, active) && skipReason && skipReason !== 'gitignored') {
+          recordSensitiveSkip(safety, skipReason);
+        } else if (!isIgnoredByScopedIgnores(fullPath, false, active) && !skipReason && isSourceFile(relativePath)) {
           files.push(relativePath);
           count++;
           onProgress?.(count, relativePath);
@@ -412,7 +1066,7 @@ function scanDirectoryWalk(
   }
 
   walk(rootDir, []);
-  return files;
+  return { files, safety };
 }
 
 /**
@@ -421,6 +1075,8 @@ function scanDirectoryWalk(
 export class ExtractionOrchestrator {
   private rootDir: string;
   private queries: QueryBuilder;
+  private ignoreFingerprint: string;
+  private scanSafetyStats: ScanSafetyStats;
   /**
    * Names of frameworks detected for this project, populated by indexAll().
    * Passed to extractFromSource so framework-specific extractors (route nodes,
@@ -432,6 +1088,32 @@ export class ExtractionOrchestrator {
   constructor(rootDir: string, queries: QueryBuilder) {
     this.rootDir = rootDir;
     this.queries = queries;
+    this.ignoreFingerprint = readStoredIgnoreFingerprint(rootDir);
+    this.scanSafetyStats = parseStoredScanSafetyStats(this.queries.getMetadata(INDEX_SAFETY_STATS_METADATA_KEY));
+  }
+
+  private hasIgnoreRulesChanged(): boolean {
+    return getIgnoreFingerprint(this.rootDir) !== this.ignoreFingerprint;
+  }
+
+  private refreshIgnoreFingerprint(): void {
+    this.ignoreFingerprint = getIgnoreFingerprint(this.rootDir);
+    writeStoredIgnoreFingerprint(this.rootDir, this.ignoreFingerprint);
+  }
+
+  private persistScanSafetyStats(stats: ScanSafetyStats): void {
+    this.scanSafetyStats = cloneScanSafetyStats(stats);
+    this.queries.setMetadata(INDEX_SAFETY_STATS_METADATA_KEY, JSON.stringify(this.scanSafetyStats));
+  }
+
+  getIndexSafetyStats(): ScanSafetyStats {
+    return cloneScanSafetyStats(this.scanSafetyStats);
+  }
+
+  private getReadableProjectFilePath(relativePath: string): string | null {
+    const fullPath = validatePathWithinRoot(this.rootDir, relativePath);
+    if (!fullPath) return null;
+    return isPathWithinRootReal(relativePath, this.rootDir) ? fullPath : null;
   }
 
   /**
@@ -454,6 +1136,7 @@ export class ExtractionOrchestrator {
       fileExists: (relativePath: string) => {
         const full = validatePathWithinRoot(rootDir, relativePath);
         if (!full) return false;
+        if (!isPathWithinRootReal(relativePath, rootDir)) return false;
         try {
           return fs.existsSync(full);
         } catch {
@@ -463,6 +1146,7 @@ export class ExtractionOrchestrator {
       readFile: (relativePath: string) => {
         const full = validatePathWithinRoot(rootDir, relativePath);
         if (!full) return null;
+        if (!isPathWithinRootReal(relativePath, rootDir)) return null;
         try {
           return fs.readFileSync(full, 'utf-8');
         } catch {
@@ -483,6 +1167,47 @@ export class ExtractionOrchestrator {
     const context = this.buildDetectionContext(fileList);
     this.detectedFrameworkNames = detectFrameworks(context).map((r) => r.name);
     return this.detectedFrameworkNames;
+  }
+
+  private purgeExcludedTrackedFiles(): number {
+    let removed = 0;
+    const trackedFiles = this.queries.getAllFiles();
+    const ignoreContexts = new Map<string, { context: { rootDir: string; relativePath: string }; trackedPath: string; realPathChanged: boolean }>();
+    const pathsByIgnoreRoot = new Map<string, string[]>();
+
+    for (const tracked of trackedFiles) {
+      const normalized = normalizePath(tracked.path);
+      const context = getIgnoreContext(this.rootDir, normalized);
+      const realProjectRelativePath = getRealProjectRelativePath(this.rootDir, normalized);
+      const realPathChanged = !!realProjectRelativePath && realProjectRelativePath !== normalized;
+      ignoreContexts.set(normalized, { context, trackedPath: tracked.path, realPathChanged });
+      const paths = pathsByIgnoreRoot.get(context.rootDir) ?? [];
+      paths.push(context.relativePath);
+      pathsByIgnoreRoot.set(context.rootDir, paths);
+    }
+
+    const ignoredByGitByRoot = new Map<string, Set<string>>();
+    for (const [ignoreRoot, filePaths] of pathsByIgnoreRoot) {
+      ignoredByGitByRoot.set(ignoreRoot, getGitIgnoredPaths(ignoreRoot, filePaths));
+    }
+
+    for (const tracked of trackedFiles) {
+      const normalized = normalizePath(tracked.path);
+      const entry = ignoreContexts.get(normalized);
+      const context = entry?.context ?? getIgnoreContext(this.rootDir, normalized);
+      const ignoredByGit = ignoredByGitByRoot.get(context.rootDir) ?? new Set<string>();
+      if (
+        !isPathWithinRootReal(normalized, this.rootDir) ||
+        (entry?.realPathChanged && getIndexPathSkipReason(this.rootDir, normalized)) ||
+        getSensitiveSkipReason(normalized) ||
+        ignoredByGit.has(context.relativePath) ||
+        isIgnoredByIgnoreFiles(context.rootDir, context.relativePath)
+      ) {
+        this.queries.deleteFile(tracked.path);
+        removed++;
+      }
+    }
+    return removed;
   }
 
   /**
@@ -513,7 +1238,7 @@ export class ExtractionOrchestrator {
       total: 0,
     });
 
-    const files = await scanDirectoryAsync(this.rootDir, (current, file) => {
+    const scanResult = await scanDirectoryAsyncWithStats(this.rootDir, (current, file) => {
       onProgress?.({
         phase: 'scanning',
         current,
@@ -521,6 +1246,11 @@ export class ExtractionOrchestrator {
         currentFile: file,
       });
     });
+    const files = scanResult.files;
+    filesSkipped += scanResult.safety.sensitiveFilesSkipped;
+    this.persistScanSafetyStats(scanResult.safety);
+    this.purgeExcludedTrackedFiles();
+    this.refreshIgnoreFingerprint();
 
     // Detect frameworks once per indexAll run using the scanned file list.
     // Names are passed to each parse call so framework-specific extractors
@@ -731,7 +1461,7 @@ export class ExtractionOrchestrator {
       const fileContents = await Promise.all(
         batch.map(async (fp) => {
           try {
-            const fullPath = validatePathWithinRoot(this.rootDir, fp);
+            const fullPath = this.getReadableProjectFilePath(fp);
             if (!fullPath) {
               logWarn('Path traversal blocked in batch reader', { filePath: fp });
               return { filePath: fp, content: null as string | null, stats: null as fs.Stats | null, error: new Error('Path traversal blocked') };
@@ -877,7 +1607,7 @@ export class ExtractionOrchestrator {
 
         let content: string;
         try {
-          const fullPath = validatePathWithinRoot(this.rootDir, filePath);
+          const fullPath = this.getReadableProjectFilePath(filePath);
           if (!fullPath) continue;
           content = await fsp.readFile(fullPath, 'utf-8');
         } catch {
@@ -893,9 +1623,11 @@ export class ExtractionOrchestrator {
         }
 
         if (result.nodes.length > 0 || result.errors.length === 0) {
-          const language = detectLanguage(filePath, content);
-          const stats = await fsp.stat(path.join(this.rootDir, filePath));
-          this.storeExtractionResult(filePath, content, language, stats, result);
+            const language = detectLanguage(filePath, content);
+            const fullPath = this.getReadableProjectFilePath(filePath);
+            if (!fullPath) continue;
+            const stats = await fsp.stat(fullPath);
+            this.storeExtractionResult(filePath, content, language, stats, result);
 
           const idx = errors.indexOf(errEntry);
           if (idx >= 0) errors.splice(idx, 1);
@@ -922,7 +1654,7 @@ export class ExtractionOrchestrator {
 
           let fullContent: string;
           try {
-            const fullPath = validatePathWithinRoot(this.rootDir, filePath);
+            const fullPath = this.getReadableProjectFilePath(filePath);
             if (!fullPath) continue;
             fullContent = await fsp.readFile(fullPath, 'utf-8');
           } catch {
@@ -945,7 +1677,9 @@ export class ExtractionOrchestrator {
 
           if (result.nodes.length > 0 || result.errors.length === 0) {
             const language = detectLanguage(filePath, fullContent);
-            const stats = await fsp.stat(path.join(this.rootDir, filePath));
+            const fullPath = this.getReadableProjectFilePath(filePath);
+            if (!fullPath) continue;
+            const stats = await fsp.stat(fullPath);
             this.storeExtractionResult(filePath, fullContent, language, stats, result);
 
             const idx = errors.indexOf(errEntry);
@@ -1024,7 +1758,7 @@ export class ExtractionOrchestrator {
    * Index a single file
    */
   async indexFile(relativePath: string): Promise<ExtractionResult> {
-    const fullPath = validatePathWithinRoot(this.rootDir, relativePath);
+    const fullPath = this.getReadableProjectFilePath(relativePath);
 
     if (!fullPath) {
       return {
@@ -1032,6 +1766,25 @@ export class ExtractionOrchestrator {
         edges: [],
         unresolvedReferences: [],
         errors: [{ message: `Path traversal blocked: ${relativePath}`, filePath: relativePath, severity: 'error', code: 'path_traversal' }],
+        durationMs: 0,
+      };
+    }
+
+    const projectRelativePath = normalizePath(path.relative(this.rootDir, fullPath));
+    const skipReason = getIndexPathSkipReason(this.rootDir, projectRelativePath);
+    if (skipReason) {
+      this.queries.deleteFile(projectRelativePath);
+      return {
+        nodes: [],
+        edges: [],
+        unresolvedReferences: [],
+        errors: [
+          {
+            message: `Skipped excluded file path (${skipReason})`,
+            severity: 'warning',
+            code: skipReason === 'gitignored' ? 'gitignored_path_skipped' : 'sensitive_path_skipped',
+          },
+        ],
         durationMs: 0,
       };
     }
@@ -1059,7 +1812,7 @@ export class ExtractionOrchestrator {
       };
     }
 
-    return this.indexFileWithContent(relativePath, content, stats);
+    return this.indexFileWithContent(projectRelativePath, content, stats);
   }
 
   /**
@@ -1072,7 +1825,7 @@ export class ExtractionOrchestrator {
     stats: fs.Stats
   ): Promise<ExtractionResult> {
     // Prevent path traversal
-    const fullPath = validatePathWithinRoot(this.rootDir, relativePath);
+    const fullPath = this.getReadableProjectFilePath(relativePath);
     if (!fullPath) {
       logWarn('Path traversal blocked in indexFileWithContent', { relativePath });
       return {
@@ -1080,6 +1833,25 @@ export class ExtractionOrchestrator {
         edges: [],
         unresolvedReferences: [],
         errors: [{ message: 'Path traversal blocked', filePath: relativePath, severity: 'error', code: 'path_traversal' }],
+        durationMs: 0,
+      };
+    }
+
+    const projectRelativePath = normalizePath(path.relative(this.rootDir, fullPath));
+    const skipReason = getIndexPathSkipReason(this.rootDir, projectRelativePath);
+    if (skipReason) {
+      this.queries.deleteFile(projectRelativePath);
+      return {
+        nodes: [],
+        edges: [],
+        unresolvedReferences: [],
+        errors: [
+          {
+            message: `Skipped excluded file path (${skipReason})`,
+            severity: 'warning',
+            code: skipReason === 'gitignored' ? 'gitignored_path_skipped' : 'sensitive_path_skipped',
+          },
+        ],
         durationMs: 0,
       };
     }
@@ -1093,7 +1865,7 @@ export class ExtractionOrchestrator {
         errors: [
           {
             message: `File exceeds max size (${stats.size} > ${MAX_FILE_SIZE})`,
-            filePath: relativePath,
+            filePath: projectRelativePath,
             severity: 'warning',
             code: 'size_exceeded',
           },
@@ -1103,7 +1875,7 @@ export class ExtractionOrchestrator {
     }
 
     // Detect language
-    const language = detectLanguage(relativePath, content);
+    const language = detectLanguage(projectRelativePath, content);
     if (!isLanguageSupported(language)) {
       return {
         nodes: [],
@@ -1118,11 +1890,11 @@ export class ExtractionOrchestrator {
     // otherwise detect on the spot so single-file re-index paths still emit
     // route nodes / middleware / etc.
     const frameworkNames = this.ensureDetectedFrameworks();
-    const result = extractFromSource(relativePath, content, language, frameworkNames);
+    const result = extractFromSource(projectRelativePath, content, language, frameworkNames);
 
     // Store in database
     if (result.nodes.length > 0 || result.errors.length === 0) {
-      this.storeExtractionResult(relativePath, content, language, stats, result);
+      this.storeExtractionResult(projectRelativePath, content, language, stats, result);
     }
 
     return result;
@@ -1222,9 +1994,10 @@ export class ExtractionOrchestrator {
     });
 
     const filesToIndex: string[] = [];
+    filesRemoved += this.purgeExcludedTrackedFiles();
     const gitChanges = getGitChangedFiles(this.rootDir);
 
-    if (gitChanges) {
+    if (gitChanges && !gitChanges.ignoreFilesChanged && !this.hasIgnoreRulesChanged()) {
       // === Git fast path ===
       // Only inspect the files git reports as changed instead of scanning everything.
       filesChecked = gitChanges.modified.length + gitChanges.added.length + gitChanges.deleted.length;
@@ -1244,7 +2017,11 @@ export class ExtractionOrchestrator {
       // like modified files. Otherwise every sync re-indexes them and status
       // reports them as pending forever. (See issue #206.)
       for (const filePath of [...gitChanges.modified, ...gitChanges.added]) {
-        const fullPath = path.join(this.rootDir, filePath);
+        const fullPath = this.getReadableProjectFilePath(filePath);
+        if (!fullPath) {
+          logDebug('Skipping path outside project root during sync', { filePath });
+          continue;
+        }
         let content: string;
         try {
           content = fs.readFileSync(fullPath, 'utf-8');
@@ -1268,7 +2045,9 @@ export class ExtractionOrchestrator {
       }
     } else {
       // === Fallback: full scan (non-git project or git failure) ===
-      const currentFiles = new Set(scanDirectory(this.rootDir));
+      const scanResult = scanDirectoryWithStats(this.rootDir);
+      this.persistScanSafetyStats(scanResult.safety);
+      const currentFiles = new Set(scanResult.files);
       filesChecked = currentFiles.size;
 
       // Build Map for O(1) lookups instead of .find() per file
@@ -1288,7 +2067,11 @@ export class ExtractionOrchestrator {
 
       // Find files to add or update
       for (const filePath of currentFiles) {
-        const fullPath = path.join(this.rootDir, filePath);
+        const fullPath = this.getReadableProjectFilePath(filePath);
+        if (!fullPath) {
+          logDebug('Skipping path outside project root during sync', { filePath });
+          continue;
+        }
         let content: string;
         try {
           content = fs.readFileSync(fullPath, 'utf-8');
@@ -1311,6 +2094,7 @@ export class ExtractionOrchestrator {
         }
       }
     }
+    this.refreshIgnoreFingerprint();
 
     // Load only grammars needed for changed files
     if (filesToIndex.length > 0) {
@@ -1355,7 +2139,7 @@ export class ExtractionOrchestrator {
   getChangedFiles(): { added: string[]; modified: string[]; removed: string[] } {
     const gitChanges = getGitChangedFiles(this.rootDir);
 
-    if (gitChanges) {
+    if (gitChanges && !gitChanges.ignoreFilesChanged && !this.hasIgnoreRulesChanged()) {
       // === Git fast path ===
       const added: string[] = [];
       const modified: string[] = [];
@@ -1374,7 +2158,11 @@ export class ExtractionOrchestrator {
       // hash-compared like modified files instead of always counting as added —
       // otherwise status reports them as pending forever. (See issue #206.)
       for (const filePath of [...gitChanges.modified, ...gitChanges.added]) {
-        const fullPath = path.join(this.rootDir, filePath);
+        const fullPath = this.getReadableProjectFilePath(filePath);
+        if (!fullPath) {
+          logDebug('Skipping path outside project root while detecting changes', { filePath });
+          continue;
+        }
         let content: string;
         try {
           content = fs.readFileSync(fullPath, 'utf-8');
@@ -1419,7 +2207,11 @@ export class ExtractionOrchestrator {
 
     // Find added and modified files
     for (const filePath of currentFiles) {
-      const fullPath = path.join(this.rootDir, filePath);
+      const fullPath = this.getReadableProjectFilePath(filePath);
+      if (!fullPath) {
+        logDebug('Skipping path outside project root while detecting changes', { filePath });
+        continue;
+      }
       let content: string;
       try {
         content = fs.readFileSync(fullPath, 'utf-8');
