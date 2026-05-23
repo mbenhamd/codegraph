@@ -26,6 +26,57 @@ const EXTENSION_RESOLUTION: Record<string, string[]> = {
   ruby: ['.rb'],
 };
 
+const TYPESCRIPT_SOURCE_SUBSTITUTION: Record<string, string[]> = {
+  '.js': ['.ts', '.tsx', '.d.ts', '.js', '.jsx'],
+  '.jsx': ['.tsx', '.ts', '.d.ts', '.jsx', '.js'],
+};
+
+function tryTypeScriptRuntimeSpecifier(
+  basePath: string,
+  language: Language,
+  context: ResolutionContext
+): string | null | undefined {
+  if (language !== 'typescript' && language !== 'tsx') {
+    return undefined;
+  }
+
+  const ext = path.posix.extname(basePath);
+  const sourceExtensions = TYPESCRIPT_SOURCE_SUBSTITUTION[ext];
+  if (!sourceExtensions) {
+    return undefined;
+  }
+
+  const sourceBase = basePath.slice(0, -ext.length);
+  for (const sourceExt of sourceExtensions) {
+    const candidatePath = sourceBase + sourceExt;
+    if (context.fileExists(candidatePath)) {
+      return candidatePath;
+    }
+  }
+
+  return null;
+}
+
+function tryWithExtensions(
+  basePath: string,
+  language: Language,
+  context: ResolutionContext
+): string | null {
+  const substituted = tryTypeScriptRuntimeSpecifier(basePath, language, context);
+  if (substituted !== undefined) return substituted;
+
+  const extensions = EXTENSION_RESOLUTION[language] || [];
+
+  for (const ext of extensions) {
+    const candidatePath = basePath + ext;
+    if (context.fileExists(candidatePath)) {
+      return candidatePath;
+    }
+  }
+
+  return context.fileExists(basePath) ? basePath : null;
+}
+
 /**
  * Resolve an import path to an actual file
  */
@@ -121,26 +172,12 @@ function resolveRelativeImport(
   context: ResolutionContext
 ): string | null {
   const projectRoot = context.getProjectRoot();
-  const extensions = EXTENSION_RESOLUTION[language] || [];
 
-  // Try the path as-is first
+  // Resolve from the normalized project-relative path.
   const basePath = path.resolve(fromDir, importPath);
   const relativePath = path.relative(projectRoot, basePath).replace(/\\/g, '/');
 
-  // Try each extension
-  for (const ext of extensions) {
-    const candidatePath = relativePath + ext;
-    if (context.fileExists(candidatePath)) {
-      return candidatePath;
-    }
-  }
-
-  // Try without extension (might already have one)
-  if (context.fileExists(relativePath)) {
-    return relativePath;
-  }
-
-  return null;
+  return tryWithExtensions(relativePath, language, context);
 }
 
 /**
@@ -160,14 +197,8 @@ function resolveAliasedImport(
   language: Language,
   context: ResolutionContext
 ): string | null {
-  const extensions = EXTENSION_RESOLUTION[language] || [];
   const tryWithExt = (basePath: string): string | null => {
-    for (const ext of extensions) {
-      const candidate = basePath + ext;
-      if (context.fileExists(candidate)) return candidate;
-    }
-    if (context.fileExists(basePath)) return basePath;
-    return null;
+    return tryWithExtensions(basePath, language, context);
   };
 
   // 1. Project tsconfig/jsconfig paths.

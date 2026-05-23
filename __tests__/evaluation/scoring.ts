@@ -2,7 +2,7 @@ import type { EvalApi, EvalEdge, EvalNode, EvalResult, EvalSuite } from './types
 
 // Structural evals measure several API families with different result shapes.
 // Keep the historical 50% recall gate here; individual cases should use
-// forbidden/noise checks when one missing symbol is unacceptable.
+// minRecall, forbidden, or noise checks when one missing symbol is unacceptable.
 export const PASS_THRESHOLD = 0.5;
 
 export interface CandidateNode {
@@ -26,6 +26,7 @@ export interface ScoreInput {
   mrr?: number;
   targetSymbol?: string;
   targetFilePath?: string;
+  minRecall?: number;
   maxLatencyMs?: number;
   notes?: string[];
 }
@@ -91,12 +92,16 @@ export function scoreCandidates(input: ScoreInput): EvalResult {
   const edgeCount = input.edges?.length ?? 0;
   const edgeDensity = input.candidates.length > 0 ? edgeCount / input.candidates.length : 0;
   const edgeStats = summarizeEdges(input.edges ?? []);
+  const minRecall = Math.max(PASS_THRESHOLD, input.minRecall ?? PASS_THRESHOLD);
   const latencyPass = input.maxLatencyMs === undefined || input.latencyMs <= input.maxLatencyMs;
-  const pass = recall >= PASS_THRESHOLD && falsePositiveCount === 0 && latencyPass;
+  const pass = recall >= minRecall && falsePositiveCount === 0 && latencyPass;
 
   const notes = [...(input.notes ?? [])];
   if (!latencyPass && input.maxLatencyMs !== undefined) {
     notes.push(`latency ${Math.round(input.latencyMs)}ms exceeded ${input.maxLatencyMs}ms`);
+  }
+  if (recall < minRecall) {
+    notes.push(`recall ${recall.toFixed(2)} below ${minRecall.toFixed(2)}`);
   }
 
   return {

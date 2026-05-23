@@ -314,6 +314,160 @@ describe('Resolution Module', () => {
       expect(result).toBe('src/helpers.ts');
     });
 
+    it('should prefer index files over matching directories', () => {
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        fileExists: (p) => p === 'src/components/utils' || p === 'src/components/utils/index.ts',
+        readFile: () => null,
+        getProjectRoot: () => '',
+        getAllFiles: () => ['src/components/utils/index.ts'],
+      };
+
+      const result = resolveImportPath(
+        './utils',
+        'src/components/Button.ts',
+        'typescript',
+        context
+      );
+
+      expect(result).toBe('src/components/utils/index.ts');
+    });
+
+    it('should prefer TypeScript source siblings for explicit .js specifiers', () => {
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        fileExists: (p) => p === 'src/components/utils.ts' || p === 'src/components/utils.js',
+        readFile: () => null,
+        getProjectRoot: () => '',
+        getAllFiles: () => ['src/components/utils.ts', 'src/components/utils.js'],
+      };
+
+      const result = resolveImportPath(
+        './utils.js',
+        'src/components/Button.ts',
+        'typescript',
+        context
+      );
+
+      expect(result).toBe('src/components/utils.ts');
+    });
+
+    it('should resolve explicit .js specifiers to .ts before .tsx from TSX importers', () => {
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        fileExists: (p) => p === 'src/components/utils.ts' || p === 'src/components/utils.tsx',
+        readFile: () => null,
+        getProjectRoot: () => '',
+        getAllFiles: () => ['src/components/utils.ts', 'src/components/utils.tsx'],
+      };
+
+      const result = resolveImportPath(
+        './utils.js',
+        'src/components/Button.tsx',
+        'tsx',
+        context
+      );
+
+      expect(result).toBe('src/components/utils.ts');
+    });
+
+    it('should resolve explicit .jsx specifiers to .tsx before .ts from TS importers', () => {
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        fileExists: (p) => p === 'src/components/utils.ts' || p === 'src/components/utils.tsx',
+        readFile: () => null,
+        getProjectRoot: () => '',
+        getAllFiles: () => ['src/components/utils.ts', 'src/components/utils.tsx'],
+      };
+
+      const result = resolveImportPath(
+        './utils.jsx',
+        'src/components/Button.ts',
+        'typescript',
+        context
+      );
+
+      expect(result).toBe('src/components/utils.tsx');
+    });
+
+    it('should resolve explicit .js specifiers to .jsx when no stronger source exists', () => {
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        fileExists: (p) => p === 'src/components/utils.jsx',
+        readFile: () => null,
+        getProjectRoot: () => '',
+        getAllFiles: () => ['src/components/utils.jsx'],
+      };
+
+      const result = resolveImportPath(
+        './utils.js',
+        'src/components/Button.ts',
+        'typescript',
+        context
+      );
+
+      expect(result).toBe('src/components/utils.jsx');
+    });
+
+    it('should resolve explicit .jsx specifiers to .js when no stronger source exists', () => {
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        fileExists: (p) => p === 'src/components/utils.js',
+        readFile: () => null,
+        getProjectRoot: () => '',
+        getAllFiles: () => ['src/components/utils.js'],
+      };
+
+      const result = resolveImportPath(
+        './utils.jsx',
+        'src/components/Button.ts',
+        'typescript',
+        context
+      );
+
+      expect(result).toBe('src/components/utils.js');
+    });
+
+    it('should not treat explicit .js specifiers as directory imports', () => {
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        fileExists: (p) => p === 'src/components/utils.js/index.ts',
+        readFile: () => null,
+        getProjectRoot: () => '',
+        getAllFiles: () => ['src/components/utils.js/index.ts'],
+      };
+
+      const result = resolveImportPath(
+        './utils.js',
+        'src/components/Button.ts',
+        'typescript',
+        context
+      );
+
+      expect(result).toBeNull();
+    });
+
     it('should extract JS/TS import mappings', () => {
       const content = `
 import { foo } from './foo';
@@ -844,6 +998,48 @@ def bootstrap():
       expect(signInNode).toBeDefined();
       const callers = cg.getCallers(signInNode!.id);
       expect(callers.some((c) => c.node.filePath === 'src/main.ts')).toBe(true);
+    });
+
+    it('follows TypeScript .js import specifiers through aliased renamed re-exports', async () => {
+      fs.mkdirSync(path.join(tempDir, 'src/core'), { recursive: true });
+      fs.mkdirSync(path.join(tempDir, 'src/app'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'tsconfig.json'),
+        JSON.stringify({
+          compilerOptions: {
+            baseUrl: '.',
+            paths: {
+              '@core/*': ['src/core/*'],
+            },
+          },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'src/core/persist.ts'),
+        `export function persistOrder(orderId: string): string { return orderId; }\n`
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'src/core/index.ts'),
+        `export { persistOrder as storeOrder } from './persist.js';\n`
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'src/app/checkout.ts'),
+        `import { storeOrder } from '@core/index.js';\nexport function checkout(orderId: string): string { return storeOrder(orderId); }\n`
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      const persistNode = cg
+        .getNodesByKind('function')
+        .find((n) => n.name === 'persistOrder' && n.filePath === 'src/core/persist.ts');
+      expect(persistNode).toBeDefined();
+      const callees = cg.getCallees(
+        cg.getNodesByKind('function').find((n) => n.name === 'checkout' && n.filePath === 'src/app/checkout.ts')!.id
+      );
+      expect(callees.some((c) => c.node.id === persistNode!.id)).toBe(true);
+      const callers = cg.getCallers(persistNode!.id);
+      expect(callers.some((c) => c.node.filePath === 'src/app/checkout.ts')).toBe(true);
     });
   });
 
