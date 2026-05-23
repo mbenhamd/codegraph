@@ -38,6 +38,7 @@ export interface EvalTestCase {
   targetKinds?: string[];
   literalText?: string;
   maxDepth?: number;
+  minRecall?: number;
   maxLatencyMs?: number;
   required?: boolean;
   options?: Record<string, unknown>;

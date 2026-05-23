@@ -134,10 +134,14 @@ export const structuralTestCases: EvalTestCase[] = [
     targetSymbol: 'persistOrder',
     targetFilePath: 'src/core/persist.ts',
     targetKinds: ['function'],
-    expectedSymbols: ['saveOrder'],
-    expectedMatches: [{ name: 'saveOrder', filePath: 'src/app/wrapper.ts' }],
+    expectedSymbols: ['saveOrder', 'checkout'],
+    expectedMatches: [
+      { name: 'saveOrder', filePath: 'src/app/wrapper.ts' },
+      { name: 'checkout', filePath: 'src/app/checkout.ts' },
+    ],
     forbiddenSymbols: ['defaults'],
     maxDepth: 2,
+    minRecall: 1,
     required: false,
   },
   {
@@ -160,10 +164,14 @@ export const structuralTestCases: EvalTestCase[] = [
     targetSymbol: 'persistOrder',
     targetFilePath: 'src/core/persist.ts',
     targetKinds: ['function'],
-    expectedSymbols: ['checkout'],
-    expectedMatches: [{ name: 'checkout', filePath: 'src/app/checkout.ts' }],
+    expectedSymbols: ['checkout', 'saveOrder'],
+    expectedMatches: [
+      { name: 'checkout', filePath: 'src/app/checkout.ts' },
+      { name: 'saveOrder', filePath: 'src/app/wrapper.ts' },
+    ],
     forbiddenSymbols: ['useDuplicate'],
     maxDepth: 2,
+    minRecall: 1,
     required: false,
   },
   {

@@ -148,6 +148,7 @@ async function runCase(cg: CodeGraphInstance, tc: EvalTestCase): Promise<EvalRes
       expectedMatches: tc.expectedMatches,
       forbiddenSymbols: tc.forbiddenSymbols,
       noisePathPatterns: tc.noisePathPatterns,
+      minRecall: tc.minRecall,
       maxLatencyMs: tc.maxLatencyMs,
     });
   }
@@ -172,6 +173,7 @@ async function runCase(cg: CodeGraphInstance, tc: EvalTestCase): Promise<EvalRes
         expectedMatches: tc.expectedMatches,
         forbiddenSymbols: tc.forbiddenSymbols,
         noisePathPatterns: tc.noisePathPatterns,
+        minRecall: tc.minRecall,
         maxLatencyMs: tc.maxLatencyMs,
       }
     );
@@ -190,6 +192,7 @@ async function runCase(cg: CodeGraphInstance, tc: EvalTestCase): Promise<EvalRes
       latencyMs: performance.now() - start,
       required: tc.required,
       strictPrecision: isStrictPrecisionCase(tc),
+      minRecall: tc.minRecall,
       notes: ['literal task: use native text search instead of semantic graph lookup'],
     });
   }
@@ -208,6 +211,7 @@ async function runCase(cg: CodeGraphInstance, tc: EvalTestCase): Promise<EvalRes
       strictPrecision: isStrictPrecisionCase(tc),
       targetSymbol: tc.targetSymbol,
       targetFilePath: tc.targetFilePath,
+      minRecall: tc.minRecall,
       notes: [`target symbol not found: ${tc.targetSymbol ?? '<missing>'}`],
     });
   }
@@ -241,6 +245,7 @@ async function runCase(cg: CodeGraphInstance, tc: EvalTestCase): Promise<EvalRes
     noisePathPatterns: tc.noisePathPatterns,
     targetSymbol: target.name,
     targetFilePath: target.filePath,
+    minRecall: tc.minRecall,
     maxLatencyMs: tc.maxLatencyMs,
   });
 }
@@ -266,6 +271,7 @@ function scoreGraphPairs(
     noisePathPatterns: tc.noisePathPatterns,
     targetSymbol: target.name,
     targetFilePath: target.filePath,
+    minRecall: tc.minRecall,
     maxLatencyMs: tc.maxLatencyMs,
   });
 }
