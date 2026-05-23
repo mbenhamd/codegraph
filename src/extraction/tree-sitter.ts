@@ -122,6 +122,18 @@ const INSTANTIATION_KINDS: ReadonlySet<string> = new Set([
   'instance_creation_expression',    // some grammars
 ]);
 
+const TRANSPARENT_EXPRESSION_WRAPPERS: ReadonlySet<string> = new Set([
+  'parenthesized_expression',
+  'as_expression',
+  'satisfies_expression',
+  'non_null_expression',
+]);
+
+type WrappedCallback = {
+  callback: SyntaxNode;
+  wrapperName: string;
+};
+
 /**
  * TreeSitterExtractor - Main extraction class
  */
@@ -1042,6 +1054,23 @@ export class TreeSitterExtractor {
               this.extractFunction(valueNode);
               continue;
             }
+            const unwrappedValue = valueNode ? this.unwrapTransparentExpression(valueNode) : null;
+            const wrappedCallback = unwrappedValue?.type === 'call_expression'
+              ? this.findCallableWrapperCallback(unwrappedValue)
+              : null;
+            if (wrappedCallback) {
+              this.extractWrappedCallbackFunction(
+                child,
+                name,
+                wrappedCallback.callback,
+                wrappedCallback.wrapperName,
+                {
+                  docstring,
+                  isExported,
+                }
+              );
+              continue;
+            }
 
             // Capture first 100 chars of initializer for context (stored in signature for searchability)
             const initValue = valueNode ? getNodeText(valueNode, this.source).slice(0, 100) : undefined;
@@ -1158,6 +1187,192 @@ export class TreeSitterExtractor {
         }
       }
     }
+  }
+
+  private findCallableWrapperCallback(callNode: SyntaxNode): WrappedCallback | null {
+    const wrapperName = this.getDirectCallName(callNode);
+    if (!wrapperName) return null;
+
+    const args = getChildByField(callNode, 'arguments');
+    if (!args) return null;
+
+    for (let i = 0; i < args.namedChildCount; i++) {
+      const arg = args.namedChild(i);
+      if (!arg) continue;
+      const callback = this.unwrapTransparentExpression(arg);
+      if (callback.type === 'arrow_function' || callback.type === 'function_expression') {
+        if (this.isTransparentLocalWrapper(wrapperName, i)) {
+          return { callback, wrapperName };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private getDirectCallName(callNode: SyntaxNode): string | null {
+    const fn = getChildByField(callNode, 'function') || callNode.namedChild(0);
+    if (!fn || fn.type !== 'identifier') return null;
+    return getNodeText(fn, this.source);
+  }
+
+  private unwrapTransparentExpression(node: SyntaxNode): SyntaxNode {
+    let current = node;
+    while (TRANSPARENT_EXPRESSION_WRAPPERS.has(current.type)) {
+      const expression = getChildByField(current, 'expression')
+        || getChildByField(current, 'value')
+        || current.namedChild(0);
+      if (!expression) break;
+      current = expression;
+    }
+    return current;
+  }
+
+  private isTransparentLocalWrapper(wrapperName: string, callbackIndex: number): boolean {
+    const wrapper = this.findTopLevelFunctionLikeDefinition(wrapperName);
+    if (!wrapper) return false;
+    if (this.extractor?.isAsync?.(wrapper)) return false;
+
+    const paramName = this.getParameterNameAt(wrapper, callbackIndex);
+    if (!paramName) return false;
+
+    return this.returnsIdentifier(wrapper, paramName);
+  }
+
+  private findTopLevelFunctionLikeDefinition(name: string): SyntaxNode | null {
+    const root = this.tree?.rootNode;
+    if (!root) return null;
+
+    for (let i = 0; i < root.namedChildCount; i++) {
+      const child = root.namedChild(i);
+      if (!child) continue;
+      const found = this.findFunctionLikeDefinitionInTopLevelNode(child, name);
+      if (found) return found;
+    }
+
+    return null;
+  }
+
+  private findFunctionLikeDefinitionInTopLevelNode(node: SyntaxNode, name: string): SyntaxNode | null {
+    if (!this.extractor) return null;
+
+    if (node.type === 'export_statement') {
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const child = node.namedChild(i);
+        if (!child) continue;
+        const found = this.findFunctionLikeDefinitionInTopLevelNode(child, name);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    if (node.type === 'function_declaration' && extractName(node, this.source, this.extractor) === name) {
+      return node;
+    }
+
+    if (node.type !== 'lexical_declaration' && node.type !== 'variable_declaration') {
+      return null;
+    }
+
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (child?.type !== 'variable_declarator') continue;
+
+      const nameNode = getChildByField(child, 'name');
+      const valueNode = getChildByField(child, 'value');
+      if (
+        nameNode &&
+        getNodeText(nameNode, this.source) === name &&
+        valueNode &&
+        (valueNode.type === 'arrow_function' || valueNode.type === 'function_expression')
+      ) {
+        return valueNode;
+      }
+    }
+
+    return null;
+  }
+
+  private getParameterNameAt(functionNode: SyntaxNode, index: number): string | null {
+    if (!this.extractor) return null;
+    const params = getChildByField(functionNode, this.extractor.paramsField || 'parameters');
+    const param = params?.namedChild(index);
+    if (!param) return null;
+
+    if (param.type === 'identifier') {
+      return getNodeText(param, this.source);
+    }
+
+    const nameNode = getChildByField(param, 'name')
+      || getChildByField(param, 'pattern')
+      || param.namedChildren.find((child) => child.type === 'identifier');
+    return nameNode ? getNodeText(nameNode, this.source) : null;
+  }
+
+  private returnsIdentifier(functionNode: SyntaxNode, name: string): boolean {
+    if (!this.extractor) return false;
+    const body = this.extractor.resolveBody?.(functionNode, this.extractor.bodyField)
+      ?? getChildByField(functionNode, this.extractor.bodyField);
+    if (!body) return false;
+
+    const unwrapped = this.unwrapTransparentExpression(body);
+    if (this.isIdentifierExpression(unwrapped, name)) {
+      return true;
+    }
+
+    if (unwrapped.type !== 'statement_block') {
+      return false;
+    }
+
+    if (unwrapped.namedChildCount !== 1) return false;
+    const child = unwrapped.namedChild(0);
+    if (child?.type !== 'return_statement') return false;
+
+    const returned = child.namedChild(0);
+    return !!returned && this.isIdentifierExpression(returned, name);
+  }
+
+  private isIdentifierExpression(node: SyntaxNode, name: string): boolean {
+    const unwrapped = this.unwrapTransparentExpression(node);
+    return unwrapped.type === 'identifier' && getNodeText(unwrapped, this.source) === name;
+  }
+
+  private extractWrappedCallbackFunction(
+    declarator: SyntaxNode,
+    name: string,
+    callback: SyntaxNode,
+    wrapperName: string,
+    extra: Pick<Node, 'docstring' | 'isExported'>
+  ): void {
+    if (!this.extractor) return;
+
+    const signature = this.extractor.getSignature?.(callback, this.source);
+    const isAsync = this.extractor.isAsync?.(callback);
+    const funcNode = this.createNode('function', name, declarator, {
+      ...extra,
+      signature,
+      isAsync,
+    });
+    if (!funcNode) return;
+
+    this.extractVariableTypeAnnotation(declarator, funcNode.id);
+    this.extractTypeAnnotations(callback, funcNode.id);
+
+    this.unresolvedReferences.push({
+      fromNodeId: funcNode.id,
+      referenceName: wrapperName,
+      referenceKind: 'calls',
+      line: declarator.startPosition.row + 1,
+      column: declarator.startPosition.column,
+    });
+
+    const body = this.extractor.resolveBody?.(callback, this.extractor.bodyField)
+      ?? getChildByField(callback, this.extractor.bodyField);
+    if (!body) return;
+
+    this.nodeStack.push(funcNode.id);
+    this.visitFunctionBody(body, funcNode.id);
+    this.nodeStack.pop();
   }
 
   /**

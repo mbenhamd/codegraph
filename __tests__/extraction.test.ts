@@ -310,6 +310,238 @@ export const fetchData = async () => {
       isExported: true,
     });
   });
+
+  it('should extract exported wrapper callback constants as callable functions', () => {
+    const code = `
+export function persist(): void {}
+function withTx<T extends (...args: any[]) => any>(fn: T): T { return fn; }
+
+export const save = withTx(async () => {
+  await persist();
+});
+`;
+    const result = extractFromSource('actions.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'save');
+    expect(funcNode).toBeDefined();
+    expect(funcNode).toMatchObject({
+      kind: 'function',
+      name: 'save',
+      isExported: true,
+    });
+
+    const constantNode = result.nodes.find((n) => n.kind === 'constant' && n.name === 'save');
+    expect(constantNode).toBeUndefined();
+
+    const calls = result.unresolvedReferences.filter(
+      (r) => r.fromNodeId === funcNode!.id && r.referenceKind === 'calls'
+    );
+    expect(calls.some((c) => c.referenceName === 'persist')).toBe(true);
+    expect(calls.some((c) => c.referenceName === 'withTx')).toBe(true);
+  });
+
+  it('should extract transparent wrapper callbacks that return object data from the callable', () => {
+    const code = `
+export function getUser(): Promise<{ id: string }> {
+  return Promise.resolve({ id: 'u1' });
+}
+function withTx<T extends (...args: any[]) => any>(fn: T): T { return fn; }
+
+export const load = withTx(async () => ({
+  user: await getUser(),
+}));
+`;
+    const result = extractFromSource('actions.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'load');
+    expect(funcNode).toMatchObject({
+      kind: 'function',
+      name: 'load',
+      isExported: true,
+    });
+
+    const calls = result.unresolvedReferences.filter(
+      (r) => r.fromNodeId === funcNode!.id && r.referenceKind === 'calls'
+    );
+    expect(calls.some((c) => c.referenceName === 'getUser')).toBe(true);
+  });
+
+  it('should keep wrapper-like data constants as constants', () => {
+    const code = `
+function withDefaults<T>(value: T): T { return value; }
+const persist = 'not a function call';
+
+export const config = withDefaults({
+  persist,
+  retries: 3,
+});
+`;
+    const result = extractFromSource('config.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'config');
+    expect(funcNode).toBeUndefined();
+
+    const constantNode = result.nodes.find((n) => n.kind === 'constant' && n.name === 'config');
+    expect(constantNode).toMatchObject({
+      kind: 'constant',
+      name: 'config',
+      isExported: true,
+    });
+  });
+
+  it('should keep callback-executing data factories as constants', () => {
+    const code = `
+function buildConfig() {
+  return { retries: 3 };
+}
+function withDefaults<T>(fn: () => T): T { return fn(); }
+
+export const config = withDefaults(() => buildConfig());
+`;
+    const result = extractFromSource('config.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'config');
+    expect(funcNode).toBeUndefined();
+
+    const constantNode = result.nodes.find((n) => n.kind === 'constant' && n.name === 'config');
+    expect(constantNode).toMatchObject({
+      kind: 'constant',
+      name: 'config',
+      isExported: true,
+    });
+  });
+
+  it('should keep conditionally transparent wrappers as constants', () => {
+    const code = `
+function persist(): void {}
+function maybe<T extends (...args: any[]) => any>(fn: T): T | null {
+  if (Math.random() > 0.5) return fn;
+  return null;
+}
+
+export const save = maybe(() => persist());
+`;
+    const result = extractFromSource('actions.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'save');
+    expect(funcNode).toBeUndefined();
+
+    const constantNode = result.nodes.find((n) => n.kind === 'constant' && n.name === 'save');
+    expect(constantNode).toMatchObject({
+      kind: 'constant',
+      name: 'save',
+      isExported: true,
+    });
+  });
+
+  it('should extract transparent wrappers that return cast callbacks', () => {
+    const code = `
+function persist(): void {}
+function withTx<T extends (...args: any[]) => any>(fn: T): T {
+  return fn as T;
+}
+
+export const save = withTx(() => persist());
+`;
+    const result = extractFromSource('actions.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'save');
+    expect(funcNode).toMatchObject({
+      kind: 'function',
+      name: 'save',
+      isExported: true,
+    });
+
+    const calls = result.unresolvedReferences.filter(
+      (r) => r.fromNodeId === funcNode!.id && r.referenceKind === 'calls'
+    );
+    expect(calls.some((c) => c.referenceName === 'persist')).toBe(true);
+  });
+
+  it('should extract transparent wrapped callbacks without inner calls as functions', () => {
+    const code = `
+function withTx<T extends (...args: any[]) => any>(fn: T): T { return fn; }
+
+export const load = withTx(() => ({ ok: true }));
+`;
+    const result = extractFromSource('actions.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'load');
+    expect(funcNode).toMatchObject({
+      kind: 'function',
+      name: 'load',
+      isExported: true,
+    });
+
+    const constantNode = result.nodes.find((n) => n.kind === 'constant' && n.name === 'load');
+    expect(constantNode).toBeUndefined();
+  });
+
+  it('should extract transparent wrapper callbacks from cast initializers', () => {
+    const code = `
+function persist(): void {}
+function withTx<T extends (...args: any[]) => any>(fn: T): T { return fn; }
+
+export const save = (withTx(() => persist()) as () => void);
+`;
+    const result = extractFromSource('actions.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'save');
+    expect(funcNode).toMatchObject({
+      kind: 'function',
+      name: 'save',
+      isExported: true,
+    });
+
+    const calls = result.unresolvedReferences.filter(
+      (r) => r.fromNodeId === funcNode!.id && r.referenceKind === 'calls'
+    );
+    expect(calls.some((c) => c.referenceName === 'persist')).toBe(true);
+  });
+
+  it('should extract transparent wrapper callbacks from cast arguments', () => {
+    const code = `
+function persist(): void {}
+function withTx<T extends (...args: any[]) => any>(fn: T): T { return fn; }
+
+export const save = withTx((() => persist()) as () => void);
+`;
+    const result = extractFromSource('actions.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'save');
+    expect(funcNode).toMatchObject({
+      kind: 'function',
+      name: 'save',
+      isExported: true,
+    });
+
+    const calls = result.unresolvedReferences.filter(
+      (r) => r.fromNodeId === funcNode!.id && r.referenceKind === 'calls'
+    );
+    expect(calls.some((c) => c.referenceName === 'persist')).toBe(true);
+  });
+
+  it('should keep async transparent-looking wrappers as constants', () => {
+    const code = `
+function persist(): void {}
+async function withTx<T extends (...args: any[]) => any>(fn: T): Promise<T> {
+  return fn;
+}
+
+export const save = withTx(() => persist());
+`;
+    const result = extractFromSource('actions.ts', code);
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function' && n.name === 'save');
+    expect(funcNode).toBeUndefined();
+
+    const constantNode = result.nodes.find((n) => n.kind === 'constant' && n.name === 'save');
+    expect(constantNode).toMatchObject({
+      kind: 'constant',
+      name: 'save',
+      isExported: true,
+    });
+  });
 });
 
 describe('Type Alias Extraction', () => {
