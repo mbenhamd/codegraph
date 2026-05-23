@@ -1,0 +1,8 @@
+{
+  "name": "codegraph-structural-eval-fixture",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "express": "^4.18.0"
+  }
+}

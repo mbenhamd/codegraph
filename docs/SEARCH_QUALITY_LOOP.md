@@ -6,6 +6,36 @@ A language is NOT verified until an LLM can reliably use CodeGraph's MCP tools t
 
 ## Setup
 
+For PR validation and structural accuracy observability, run the deterministic
+self-contained fixture suite:
+
+```bash
+npm run test:eval:structural
+```
+
+The structural suite builds a temporary TypeScript fixture and reports recall,
+precision, false-positive count, path-noise count, latency, and edge confidence
+/ provenance distributions. Required cases fail the command. Non-required cases
+are tracked gaps: they warn, stay visible in the JSON report, and should become
+required when the linked accuracy issue lands.
+
+Use strict mode when an accuracy-fix PR is intended to close those tracked gaps:
+
+```bash
+npm run test:eval:structural:strict
+```
+
+Strict mode exits nonzero for tracked warnings as well as required failures.
+Reports include the command line and a hash of the fixture content so a run can
+be tied back to the exact self-contained case set even though the temporary
+fixture is cleaned up by default.
+
+Helpful environment flags:
+
+- `EVAL_KEEP_FIXTURE=1` keeps and prints the temporary fixture path for debugging.
+- `EVAL_REPORT_DIR=/path/to/reports` writes JSON reports outside the default
+  ignored `__tests__/evaluation/results/` directory.
+
 ### 1. Build and index
 
 ```bash
