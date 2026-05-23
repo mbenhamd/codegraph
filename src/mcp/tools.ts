@@ -222,6 +222,7 @@ function numberSourceLines(slice: string, firstLineNumber: number): string {
  * follow links from /tmp paths in the first place.
  */
 import { formatEdgeProvenance } from '../edge-provenance';
+import { ProjectAccessGate } from './project-access';
 
 function markSessionConsulted(sessionId: string): void {
   try {
@@ -510,8 +511,27 @@ export class ToolHandler {
   // The directory the server last searched for a default project. Surfaced in
   // the "not initialized" error so users can see why detection missed.
   private defaultProjectHint: string | null = null;
+  // Cross-project access policy (PF-619). Defaults to an open gate so unit
+  // tests and library callers that construct ToolHandler directly keep the
+  // pre-PF-619 behavior; the MCP server overrides this via setProjectAccess.
+  private projectAccess: ProjectAccessGate = new ProjectAccessGate({ allowAny: true });
 
   constructor(private cg: CodeGraph | null) {}
+
+  /**
+   * Replace the cross-project access gate. Called by `MCPServer` once the
+   * default root and any `--allow-root` / env-configured extra roots are
+   * known. Existing cached projects are kept; new projectPath requests are
+   * checked against the new policy before opening.
+   */
+  setProjectAccess(gate: ProjectAccessGate): void {
+    this.projectAccess = gate;
+  }
+
+  /** Inspection hook for tests + diagnostics. */
+  getProjectAccess(): ProjectAccessGate {
+    return this.projectAccess;
+  }
 
   /**
    * Update the default CodeGraph instance (e.g. after lazy initialization)
@@ -587,7 +607,23 @@ export class ToolHandler {
       return this.cg;
     }
 
-    // Check cache first (using original path as key)
+    // PF-619: cross-project allowlist gate. Fires BEFORE the projectCache
+    // lookup so a policy that narrows during the server lifetime (e.g.
+    // `MCPServer.applyProjectAccess()` after `rootUri` arrives) doesn't
+    // let previously-cached entries bypass the new policy. The gate's
+    // realpath normalization catches symlink and `..` traversal. The gate
+    // is `allowAny` by default for library callers; the MCP server
+    // overrides it via setProjectAccess.
+    if (existsSync(projectPath)) {
+      const accessCheck = this.projectAccess.check(projectPath);
+      if (!accessCheck.allowed) {
+        throw new Error(
+          accessCheck.reason ?? `Project path is not in the allowed-roots policy.`,
+        );
+      }
+    }
+
+    // Check cache (using original path as key)
     if (this.projectCache.has(projectPath)) {
       return this.projectCache.get(projectPath)!;
     }
@@ -609,6 +645,16 @@ export class ToolHandler {
 
     if (!resolvedRoot) {
       throw new Error(`CodeGraph not initialized in ${projectPath}. Run 'codegraph init' in that project first.`);
+    }
+
+    // Re-check the gate against the *resolved* root in case walk-up landed
+    // in a different allowed subtree than the requested path (e.g. caller
+    // passed a path whose `.codegraph/` lives in an outside ancestor).
+    const rootCheck = this.projectAccess.check(resolvedRoot);
+    if (!rootCheck.allowed) {
+      throw new Error(
+        rootCheck.reason ?? `Project path is not in the allowed-roots policy: ${resolvedRoot}`,
+      );
     }
 
     // If the path resolves to the default project, reuse the already-open
