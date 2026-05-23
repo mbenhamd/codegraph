@@ -13,6 +13,7 @@
  *   codegraph index [path]       Index all files in the project
  *   codegraph sync [path]        Sync changes since last index
  *   codegraph status [path]      Show index status
+ *   codegraph inventory [path]   Summarize rewrite-relevant repo artifacts
  *   codegraph query <search>     Search for symbols
  *   codegraph files [options]    Show project file structure
  *   codegraph context <task>     Build context for a task
@@ -1105,6 +1106,82 @@ function printFileTree(
 
   renderNode(root, '', true, 0);
 }
+
+/**
+ * codegraph inventory [path]
+ */
+program
+  .command('inventory [path]')
+  .description('Summarize rewrite-relevant repository artifacts')
+  .option('-j, --json', 'Output as JSON')
+  .option('-n, --max-artifacts <number>', 'Maximum artifacts to print in text mode', '50')
+  .action(async (pathArg: string | undefined, options: { json?: boolean; maxArtifacts?: string }) => {
+    const projectPath = resolveProjectPath(pathArg);
+    const maxArtifactsRaw = options.maxArtifacts ?? '50';
+    const maxArtifactsParsed = Number.parseInt(maxArtifactsRaw, 10);
+    if (!Number.isFinite(maxArtifactsParsed) || maxArtifactsParsed < 0 || String(maxArtifactsParsed) !== maxArtifactsRaw.trim()) {
+      error(`Invalid --max-artifacts: ${maxArtifactsRaw}`);
+      process.exit(1);
+    }
+    const maxArtifacts = maxArtifactsParsed;
+
+    if (!isInitialized(projectPath)) {
+      error(`CodeGraph not initialized in ${projectPath}`);
+      info('Run "codegraph init --index" first');
+      process.exit(1);
+    }
+
+    const { default: CodeGraph, buildRepositoryInventory } = await loadCodeGraph();
+    const cg = await CodeGraph.open(projectPath);
+    try {
+      const inventory = buildRepositoryInventory(cg, projectPath);
+
+      if (options.json) {
+        console.log(JSON.stringify(inventory, null, 2));
+        return;
+      }
+      console.log(chalk.bold('\nRepository Inventory\n'));
+      console.log(chalk.cyan('Project:'), inventory.projectPath);
+      console.log();
+      console.log(chalk.bold('Summary:'));
+      console.log(`  Files:             ${formatNumber(inventory.summary.files)}`);
+      console.log(`  Nodes:             ${formatNumber(inventory.summary.nodes)}`);
+      console.log(`  Edges:             ${formatNumber(inventory.summary.edges)}`);
+      console.log(`  Packages:          ${formatNumber(inventory.summary.packages)}`);
+      console.log(`  Config files:      ${formatNumber(inventory.summary.configs)}`);
+      console.log(`  Routes:            ${formatNumber(inventory.summary.routes)}`);
+      console.log(`  Components:        ${formatNumber(inventory.summary.components)}`);
+      console.log(`  Exported symbols:  ${formatNumber(inventory.summary.exportedSymbols)}`);
+      console.log(`  Test files:        ${formatNumber(inventory.summary.testFiles)}`);
+      console.log();
+
+      if (inventory.packages.length > 0) {
+        console.log(chalk.bold('Packages:'));
+        for (const pkg of inventory.packages) {
+          const label = pkg.name ? `${pkg.name} ` : '';
+          console.log(`  ${label}${chalk.dim(pkg.path)}`);
+        }
+        console.log();
+      }
+
+      if (maxArtifacts > 0) {
+        console.log(chalk.bold(`Artifacts (${Math.min(maxArtifacts, inventory.artifacts.length)} of ${inventory.artifacts.length}):`));
+        for (const artifact of inventory.artifacts.slice(0, maxArtifacts)) {
+          const loc = artifact.startLine ? `:${artifact.startLine}` : '';
+          console.log(`  ${artifact.kind.padEnd(15)} ${artifact.name} ${chalk.dim(`${artifact.path}${loc}`)}`);
+        }
+        if (inventory.artifacts.length > maxArtifacts) {
+          info('Use --json for the full inventory, or increase --max-artifacts');
+        }
+        console.log();
+      }
+    } catch (err) {
+      error(`Failed to build inventory: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    } finally {
+      cg.destroy();
+    }
+  });
 
 /**
  * codegraph context <task>

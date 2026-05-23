@@ -328,6 +328,7 @@ codegraph uninit [path]           # Remove CodeGraph from a project (--force to 
 codegraph index [path]            # Full index (--force to re-index, --quiet for less output)
 codegraph sync [path]             # Incremental update
 codegraph status [path]           # Show statistics
+codegraph inventory [path]        # Summarize repo artifacts for rewrite planning
 codegraph query <search>          # Search symbols (--kind, --limit, --json)
 codegraph files [path]            # Show file structure (--format, --filter, --max-depth, --json)
 codegraph context <task>          # Build context for AI (--format, --max-nodes)
@@ -337,6 +338,31 @@ codegraph impact <symbol>         # Analyze what code is affected by changing a 
 codegraph affected [files...]     # Find test files affected by changes (see below)
 codegraph serve --mcp             # Start MCP server
 ```
+
+### `codegraph inventory`
+
+Summarizes rewrite-relevant repository artifacts from the current index plus
+lightweight manifest/config scanning. This is the first building block for
+migration, rewrite, recovery, and architecture-audit workflows where file paths
+may change but packages, exported APIs, tests, routes, components, and configs
+still need to be accounted for.
+
+```bash
+codegraph inventory /path/to/repo
+codegraph inventory /path/to/repo --json
+codegraph inventory /path/to/repo --max-artifacts 200
+```
+
+The JSON output is intentionally evidence-oriented: package manifests, config
+files, route/component nodes, exported symbols, test files, and source files are
+reported as stable artifacts that future multi-repo matching can compare across
+old/new repos or upstream/fork rewrites.
+
+`schemaVersion: 1` is the explicit v1 contract. v1 is npm-biased on
+package-level fields (e.g. `InventoryPackage.private` is only set for
+`ecosystem: 'npm'`); equivalent Cargo/pyproject/go.mod toggles will be added
+under an ecosystem-keyed sub-object in v2. Manifest parsing assumes trusted
+local repositories and uses unbounded reads.
 
 ### `codegraph affected`
 
