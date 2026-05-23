@@ -198,7 +198,11 @@ export class ReferenceResolver {
   private nodeCache: LRUCache<string, Node[]>; // per-file node cache
   private fileCache: LRUCache<string, string | null>; // per-file content cache
   private importMappingCache: LRUCache<string, ImportMapping[]>;
-  private reExportCache: LRUCache<string, ReExport[]>;
+  // PF-625: re-export cache entries pin the file's contentHash so a
+  // content change during a long-running watcher/sync session
+  // invalidates the cached re-export list naturally on next lookup.
+  // Without the hash, the cache would serve stale data after edits.
+  private reExportCache: LRUCache<string, { hash: string; reExports: ReExport[] }>;
   private nameCache: LRUCache<string, Node[]>; // name → nodes cache
   private lowerNameCache: LRUCache<string, Node[]>; // lower(name) → nodes cache
   private qualifiedNameCache: LRUCache<string, Node[]>; // qualified_name → nodes cache
@@ -394,15 +398,28 @@ export class ReferenceResolver {
       },
 
       getReExports: (filePath: string, language) => {
-        const cached = this.reExportCache.get(filePath);
-        if (cached) return cached;
+        // Cache lookup is only safe when a real DB-tracked contentHash
+        // is available. If `getFileByPath` returns no record (file not
+        // yet tracked, or about to be removed) we bypass the cache and
+        // re-extract every time — otherwise a long-lived resolver could
+        // serve a stale entry stamped with an empty-string hash after
+        // the file changed while untracked.
+        const currentHash = this.queries.getFileByPath(filePath)?.contentHash;
+        if (currentHash !== undefined) {
+          const cached = this.reExportCache.get(filePath);
+          if (cached && cached.hash === currentHash) return cached.reExports;
+        }
         const content = this.context.readFile(filePath);
         if (!content) {
-          this.reExportCache.set(filePath, []);
+          if (currentHash !== undefined) {
+            this.reExportCache.set(filePath, { hash: currentHash, reExports: [] });
+          }
           return [];
         }
         const reExports = extractReExports(content, language);
-        this.reExportCache.set(filePath, reExports);
+        if (currentHash !== undefined) {
+          this.reExportCache.set(filePath, { hash: currentHash, reExports });
+        }
         return reExports;
       },
     };

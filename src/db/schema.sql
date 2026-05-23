@@ -132,6 +132,19 @@ CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
 CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target, kind);
 
+-- PF-625: enforce canonical edge identity. Without this, every
+-- `INSERT OR IGNORE` for synthesized edges (PF-611b re-export edges,
+-- watch-driven re-resolution, repeated incremental syncs) silently
+-- accepts duplicates because SQLite has no constraint to violate.
+-- Identity is (source, target, kind, line, col) — line/col distinguish
+-- call sites where the same caller calls the same callee from
+-- multiple positions. COALESCE folds NULL line/col into a single
+-- bucket so file-level imports/synthesized edges (which leave line
+-- and col NULL) collapse to one row instead of accumulating across
+-- runs.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
+    ON edges(source, target, kind, COALESCE(line, -1), COALESCE(col, -1));
+
 -- File indexes
 CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
 CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);

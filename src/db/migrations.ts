@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * Migration definition
@@ -62,6 +62,31 @@ const migrations: Migration[] = [
       db.exec(`
         DROP INDEX IF EXISTS idx_edges_source;
         DROP INDEX IF EXISTS idx_edges_target;
+      `);
+    },
+  },
+  {
+    version: 5,
+    description:
+      'Enforce edge uniqueness on (source, target, kind, line, col) and clean existing duplicates (PF-625)',
+    up: (db) => {
+      // Step 1: collapse existing duplicates BEFORE creating the unique
+      // index. Keep MIN(id) for each canonical-identity group; delete
+      // the rest. Without this, the CREATE UNIQUE INDEX would fail on
+      // any DB that ran prior versions of synthesizeReExportEdges or
+      // re-indexed across file watch restarts.
+      db.exec(`
+        DELETE FROM edges WHERE id NOT IN (
+          SELECT MIN(id) FROM edges
+          GROUP BY source, target, kind, COALESCE(line, -1), COALESCE(col, -1)
+        );
+      `);
+      // Step 2: enforce the canonical identity going forward. COALESCE
+      // folds NULL line/col into a single bucket so file-level / synth
+      // edges collapse to one row.
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
+          ON edges(source, target, kind, COALESCE(line, -1), COALESCE(col, -1));
       `);
     },
   },
