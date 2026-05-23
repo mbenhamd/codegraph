@@ -69,7 +69,7 @@ export function scoreCandidates(input: ScoreInput): EvalResult {
     return {
       candidate,
       truePositive: isExpected && !isForbidden && !isNoisePath,
-      falsePositive: isUnexpected || isForbidden || isNoisePath,
+      falsePositive: isUnexpected || isWrongExpectedPath || isForbidden || isNoisePath,
       isNoisePath,
       reasons,
     };
