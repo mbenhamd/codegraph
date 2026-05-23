@@ -36,6 +36,13 @@ Helpful environment flags:
 - `EVAL_REPORT_DIR=/path/to/reports` writes JSON reports outside the default
   ignored `__tests__/evaluation/results/` directory.
 
+Context output includes `rankingDiagnostics` in JSON and a "Ranking Diagnostics"
+section in markdown when path ranking adjustments apply. Use those diagnostics
+to verify whether source roots were boosted or vendor, `third_party`, generated,
+and build-output paths were demoted. Explicit path queries such as
+`path:third_party PaymentService`, or queries that match a vendored project name
+such as `Mastra` for `third_party/mastra/**`, keep those paths reachable.
+
 ### 1. Build and index
 
 ```bash

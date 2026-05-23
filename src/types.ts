@@ -546,6 +546,13 @@ export interface TaskContext {
     /** Total characters in code blocks */
     totalCodeSize: number;
   };
+
+  /** Path ranking adjustments that affected included context files */
+  rankingDiagnostics?: Array<{
+    filePath: string;
+    scoreAdjustment: number;
+    reasons: string[];
+  }>;
 }
 
 /**

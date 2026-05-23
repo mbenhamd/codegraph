@@ -116,7 +116,16 @@ export const structuralTestCases: EvalTestCase[] = [
     expectedMatches: [{ name: 'PaymentService', filePath: 'src/app/payment-service.ts' }],
     noisePathPatterns: ['^third_party/', '^vendor/', '^generated/'],
     kinds: ['class'],
-    required: false,
+    options: { limit: 1 },
+  },
+  {
+    id: 'struct-search-explicit-vendor-remains-reachable',
+    suite: 'structural',
+    query: 'path:third_party PaymentService',
+    api: 'searchNodes',
+    expectedSymbols: ['PaymentService'],
+    expectedMatches: [{ name: 'PaymentService', filePath: 'third_party/generated/payment-service.ts' }],
+    kinds: ['class'],
   },
   {
     id: 'struct-callers-wrapper-callback',
@@ -179,8 +188,7 @@ export const structuralTestCases: EvalTestCase[] = [
       { name: 'persistOrder', filePath: 'src/core/persist.ts' },
     ],
     noisePathPatterns: ['^third_party/', '^vendor/', '^generated/'],
-    options: { searchLimit: 8, traversalDepth: 2, maxNodes: 40, minScore: 0.1 },
-    required: false,
+    options: { searchLimit: 2, traversalDepth: 0, maxNodes: 6, minScore: 0.1 },
   },
   {
     id: 'struct-literal-task-bypass',
