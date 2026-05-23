@@ -46,11 +46,55 @@ export * from './types';
 
 // Pre-built Sets for O(1) built-in lookups (allocated once, shared across all instances)
 const JS_BUILT_INS = new Set([
-  'console', 'window', 'document', 'global', 'process',
+  // Globals / runtime objects
+  'console', 'window', 'document', 'global', 'globalThis', 'process',
+  'navigator', 'location', 'localStorage', 'sessionStorage', 'crypto', 'performance',
+  // Core constructors and namespaces
   'Promise', 'Array', 'Object', 'String', 'Number', 'Boolean',
   'Date', 'Math', 'JSON', 'RegExp', 'Error', 'Map', 'Set',
+  'Symbol', 'BigInt', 'WeakMap', 'WeakSet', 'Proxy', 'Reflect',
+  'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError',
+  'AggregateError',
+  // Binary data
+  'ArrayBuffer', 'SharedArrayBuffer', 'DataView',
+  'Uint8Array', 'Uint8ClampedArray', 'Int8Array',
+  'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array',
+  'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array',
+  // Web Fetch / streams / URL
+  'fetch', 'Request', 'Response', 'Headers', 'URL', 'URLSearchParams',
+  'AbortController', 'AbortSignal', 'Blob', 'File', 'FileReader', 'FormData',
+  'ReadableStream', 'WritableStream', 'TransformStream',
+  'TextEncoder', 'TextDecoder',
+  // Events / scheduling
+  'Event', 'EventTarget', 'CustomEvent', 'MessageChannel', 'MessagePort',
   'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
-  'fetch', 'require', 'module', 'exports', '__dirname', '__filename',
+  'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame',
+  // CommonJS
+  'require', 'module', 'exports', '__dirname', '__filename',
+]);
+
+// TypeScript utility types — `Record<string, T>`, `Partial<X>`, etc. are global
+// type-level references that should not resolve to project symbols of the same
+// (lower-frequency) name. Listed separately because they only matter for JS/TS.
+const JS_TYPE_UTILS = new Set([
+  'Record', 'Partial', 'Required', 'Readonly', 'ReadonlyArray', 'ReadonlyMap', 'ReadonlySet',
+  'Pick', 'Omit', 'Exclude', 'Extract', 'Awaited', 'NonNullable',
+  'Parameters', 'ReturnType', 'InstanceType', 'ConstructorParameters',
+  'ThisParameterType', 'OmitThisParameter', 'ThisType',
+  'Uppercase', 'Lowercase', 'Capitalize', 'Uncapitalize',
+]);
+
+// Method names that come from JS/TS prototype chains — `Object.prototype`,
+// `Array.prototype`, `Map.prototype`, etc. When tree-sitter extracts a method
+// call from a complex receiver (chained call, optional chain) without the
+// receiver text, the bare name lands in `referenceName`. Resolving these to
+// arbitrary project methods of the same name is almost always wrong, so we
+// treat them as built-in unless the caller imports a project symbol shadowing
+// the name.
+const JS_BUILTIN_METHODS = new Set([
+  // Object.prototype
+  'toString', 'valueOf', 'hasOwnProperty', 'propertyIsEnumerable', 'isPrototypeOf',
+  'toLocaleString',
 ]);
 
 const REACT_HOOKS = new Set([
@@ -102,6 +146,15 @@ const GO_BUILT_INS = new Set([
   'float32', 'float64', 'complex64', 'complex128',
   'string', 'bool', 'byte', 'rune', 'any',
 ]);
+
+function isPrototypeMethodName(name: string, language: UnresolvedRef['language']): boolean {
+  const isJsTs =
+    language === 'typescript' || language === 'javascript' ||
+    language === 'tsx' || language === 'jsx';
+  if (isJsTs && JS_BUILTIN_METHODS.has(name)) return true;
+  if (language === 'python' && PYTHON_BUILT_IN_METHODS.has(name)) return true;
+  return false;
+}
 
 const PASCAL_UNIT_PREFIXES = [
   'System.', 'Winapi.', 'Vcl.', 'Fmx.', 'Data.', 'Datasnap.',
@@ -460,6 +513,30 @@ export class ReferenceResolver {
   }
 
   /**
+   * Does `ref.referenceName` (or its receiver, for dotted names) match a
+   * declaration in the caller's own file? Used to escape the built-in
+   * filter: a file that declares `class Request {}` or `def open(): ...`
+   * is using its own symbol, not the global of the same name.
+   *
+   * Does NOT apply to prototype-method names (`toString`, `valueOf`,
+   * `append`, etc.). A file that happens to define `class Far { toString() }`
+   * does not change the meaning of an unrelated `something().toString()`
+   * call in the same file — the bare method name there is still a
+   * prototype call, not a reference to `Far.toString`.
+   */
+  private shadowsBuiltInLocally(ref: UnresolvedRef): boolean {
+    const simpleName = ref.referenceName.split(/[.:]/)[0];
+    if (!simpleName) return false;
+    if (isPrototypeMethodName(simpleName, ref.language)) return false;
+    const nodesInFile = this.context.getNodesInFile(ref.filePath);
+    for (const node of nodesInFile) {
+      if (node.kind === 'import') continue;
+      if (node.name === simpleName) return true;
+    }
+    return false;
+  }
+
+  /**
    * Does `ref.referenceName` match an import declared in its containing
    * file? Used as a pre-filter escape so re-export chain resolution
    * still gets a chance when the name has no project-wide declaration.
@@ -482,8 +559,16 @@ export class ReferenceResolver {
    * Resolve a single reference
    */
   resolveOne(ref: UnresolvedRef): ResolvedRef | null {
-    // Skip built-in/external references
-    if (this.isBuiltInOrExternal(ref)) {
+    // Skip built-in/external references — but only when nothing in the
+    // caller's file shadows the name. A shadowing import (`import { Request }
+    // from './local'`) or a local declaration (`class Request {}` in the same
+    // file) must still resolve to the project symbol. This rule applies
+    // uniformly across JS/TS, Python, and Go built-in filters.
+    if (
+      this.isBuiltInOrExternal(ref) &&
+      !this.matchesAnyImport(ref) &&
+      !this.shadowsBuiltInLocally(ref)
+    ) {
       return null;
     }
 
@@ -704,7 +789,7 @@ export class ReferenceResolver {
       || ref.language === 'tsx' || ref.language === 'jsx';
 
     // JavaScript/TypeScript built-ins
-    if (isJsTs && JS_BUILT_INS.has(name)) {
+    if (isJsTs && (JS_BUILT_INS.has(name) || JS_TYPE_UTILS.has(name) || JS_BUILTIN_METHODS.has(name))) {
       return true;
     }
 
