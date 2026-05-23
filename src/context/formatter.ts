@@ -34,6 +34,17 @@ export function formatContextAsMarkdown(context: TaskContext): string {
     lines.push('');
   }
 
+  if (context.rankingDiagnostics && context.rankingDiagnostics.length > 0) {
+    lines.push('### Ranking Diagnostics\n');
+    for (const diagnostic of context.rankingDiagnostics.slice(0, 8)) {
+      const signedAdjustment = diagnostic.scoreAdjustment > 0
+        ? `+${diagnostic.scoreAdjustment}`
+        : String(diagnostic.scoreAdjustment);
+      lines.push(`- ${diagnostic.filePath}: ${signedAdjustment} (${diagnostic.reasons.join(', ')})`);
+    }
+    lines.push('');
+  }
+
   // Related symbols - compact list (skip verbose structure tree)
   const otherSymbols = Array.from(context.subgraph.nodes.values())
     .filter(n => !context.entryPoints.some(e => e.id === n.id))
@@ -94,6 +105,7 @@ export function formatContextAsJson(context: TaskContext): string {
     })),
     relatedFiles: context.relatedFiles,
     stats: context.stats,
+    rankingDiagnostics: context.rankingDiagnostics ?? [],
   };
 
   return JSON.stringify(serializable, null, 2);

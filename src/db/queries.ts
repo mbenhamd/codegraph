@@ -18,7 +18,7 @@ import {
   SearchResult,
 } from '../types';
 import { safeJsonParse } from '../utils';
-import { kindBonus, nameMatchBonus, scorePathRelevance } from '../search/query-utils';
+import { extractSearchTerms, kindBonus, nameMatchBonus, scorePathRelevance } from '../search/query-utils';
 import { parseQuery, boundedEditDistance } from '../search/query-parser';
 
 /**
@@ -122,6 +122,10 @@ function rowToEdge(row: EdgeRow): Edge {
     column: row.col ?? undefined,
     provenance: row.provenance as Edge['provenance'],
   };
+}
+
+function escapeSqlLike(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
 /**
@@ -558,9 +562,12 @@ export class QueryBuilder {
     const text = parsed.text;
     const kinds = mergedKinds;
     const languages = mergedLanguages;
+    const hasHardFilters = pathFilters.length > 0 || nameFilters.length > 0;
 
     // First try FTS5 with prefix matching
-    let results = text
+    let results = hasHardFilters && offset > 0
+      ? []
+      : text
       ? this.searchNodesFTS(text, { kinds, languages, limit, offset })
       // Over-fetch by 5× when running filter-only (no text). The
       // post-scoring path: + name: filters can be very selective, so
@@ -613,21 +620,22 @@ export class QueryBuilder {
       }
     }
 
-    // Apply multi-signal scoring
-    if (results.length > 0 && (text || query)) {
-      const scoringQuery = text || query;
-      results = results.map(r => ({
+    const pathScoringQuery = [text, ...pathFilters.map((p) => `path:${p}`)]
+      .filter(Boolean)
+      .join(' ') || query;
+    const nameScoringQuery = text || query;
+    const scoreCandidates = (candidates: SearchResult[]): SearchResult[] => candidates.map(r => ({
         ...r,
         score: r.score
           + kindBonus(r.node.kind)
-          + scorePathRelevance(r.node.filePath, scoringQuery)
-          + nameMatchBonus(r.node.name, scoringQuery),
+          + scorePathRelevance(r.node.filePath, pathScoringQuery)
+          + nameMatchBonus(r.node.name, nameScoringQuery),
       }));
+
+    // Apply multi-signal scoring
+    if (results.length > 0 && (text || query)) {
+      results = scoreCandidates(results);
       results.sort((a, b) => b.score - a.score);
-      // Trim to requested limit after rescoring
-      if (results.length > limit) {
-        results = results.slice(0, limit);
-      }
     }
 
     // Apply path: + name: filters AFTER scoring. Scoring already uses
@@ -647,6 +655,28 @@ export class QueryBuilder {
         const nm = r.node.name.toLowerCase();
         return lowered.some((n) => nm.includes(n));
       });
+    }
+
+    if (hasHardFilters && results.length < limit) {
+      const existingIds = new Set(results.map((r) => r.node.id));
+      const supplemental = this.searchNodesByHardFilters({
+        text,
+        pathFilters,
+        nameFilters,
+        kinds,
+        languages,
+        excludeIds: existingIds,
+        limit: limit - results.length,
+        offset: results.length === 0 ? offset : 0,
+      });
+      if (supplemental.length > 0) {
+        results.push(...scoreCandidates(supplemental));
+        results.sort((a, b) => b.score - a.score);
+      }
+    }
+
+    if (results.length > limit) {
+      results = results.slice(0, limit);
     }
 
     return results;
@@ -678,6 +708,70 @@ export class QueryBuilder {
     params.push(limit);
     const rows = this.db.prepare(sql).all(...params) as NodeRow[];
     return rows.map((row) => ({ node: rowToNode(row), score: 1 }));
+  }
+
+  private searchNodesByHardFilters(options: {
+    text: string;
+    pathFilters: string[];
+    nameFilters: string[];
+    kinds?: NodeKind[];
+    languages?: Language[];
+    excludeIds: Set<string>;
+    limit: number;
+    offset: number;
+  }): SearchResult[] {
+    const { text, pathFilters, nameFilters, kinds, languages, excludeIds, limit, offset } = options;
+    if (limit <= 0) return [];
+
+    let sql = 'SELECT * FROM nodes WHERE 1=1';
+    const params: (string | number)[] = [];
+
+    if (pathFilters.length > 0) {
+      sql += ` AND (${pathFilters.map(() => "lower(file_path) LIKE ? ESCAPE '\\'").join(' OR ')})`;
+      params.push(...pathFilters.map((p) => `%${escapeSqlLike(p.toLowerCase())}%`));
+    }
+    if (nameFilters.length > 0) {
+      sql += ` AND (${nameFilters.map(() => "lower(name) LIKE ? ESCAPE '\\'").join(' OR ')})`;
+      params.push(...nameFilters.map((n) => `%${escapeSqlLike(n.toLowerCase())}%`));
+    }
+    if (kinds && kinds.length > 0) {
+      sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+      params.push(...kinds);
+    }
+    if (languages && languages.length > 0) {
+      sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
+      params.push(...languages);
+    }
+
+    const terms = extractSearchTerms(text, { stems: false });
+    if (terms.length > 0) {
+      const termClauses: string[] = [];
+      for (const term of terms) {
+        termClauses.push(
+          "lower(name) LIKE ? ESCAPE '\\'",
+          "lower(qualified_name) LIKE ? ESCAPE '\\'",
+          "lower(docstring) LIKE ? ESCAPE '\\'",
+          "lower(signature) LIKE ? ESCAPE '\\'"
+        );
+        const pattern = `%${escapeSqlLike(term.toLowerCase())}%`;
+        params.push(pattern, pattern, pattern, pattern);
+      }
+      sql += ` AND (${termClauses.join(' OR ')})`;
+    }
+
+    sql += ' ORDER BY length(name) ASC, file_path ASC LIMIT ? OFFSET ?';
+    params.push(Math.max(limit * 5, 100), offset);
+
+    const rows = this.db.prepare(sql).all(...params) as NodeRow[];
+    const results: SearchResult[] = [];
+    for (const row of rows) {
+      const node = rowToNode(row);
+      if (excludeIds.has(node.id)) continue;
+      excludeIds.add(node.id);
+      results.push({ node, score: 1 });
+      if (results.length >= limit) break;
+    }
+    return results;
   }
 
   /**

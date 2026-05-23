@@ -135,6 +135,22 @@ export function validateEmail(email: string): boolean {
 `
     );
 
+    const vendorDir = path.join(testDir, 'third_party', 'generated');
+    fs.mkdirSync(vendorDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(vendorDir, 'payment.ts'),
+      `/**
+ * Vendored fixture duplicate.
+ */
+
+export class PaymentService {
+  async processPayment(amount: number): Promise<string> {
+    return 'vendored-' + amount;
+  }
+}
+`
+    );
+
     // Initialize CodeGraph
     cg = CodeGraph.initSync(testDir, {
       config: {
@@ -210,6 +226,33 @@ export function validateEmail(email: string): boolean {
 
       expect(result.nodes.size).toBeLessThanOrEqual(5);
     });
+
+    it('should rank local source above vendored generated duplicates', async () => {
+      const result = await cg.findRelevantContext('PaymentService processPayment', {
+        searchLimit: 3,
+        traversalDepth: 0,
+        maxNodes: 10,
+        minScore: 0,
+      });
+      const entryPaths = result.roots
+        .map((id) => result.nodes.get(id)?.filePath)
+        .filter((filePath): filePath is string => Boolean(filePath));
+      const appIndex = entryPaths.indexOf('src/payment.ts');
+      const vendorIndex = entryPaths.indexOf('third_party/generated/payment.ts');
+
+      expect(entryPaths[0]).toBe('src/payment.ts');
+      expect(vendorIndex === -1 || vendorIndex > appIndex).toBe(true);
+    });
+
+    it('should apply hard path filters before trimming search results', () => {
+      const results = cg.searchNodes('path:third_party PaymentService', {
+        limit: 1,
+        kinds: ['class'],
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0]!.node.filePath).toBe('third_party/generated/payment.ts');
+    });
   });
 
   describe('buildContext()', () => {
@@ -238,6 +281,25 @@ export function validateEmail(email: string): boolean {
       expect(parsed.query).toBe('payment processing');
       expect(parsed.nodes).toBeDefined();
       expect(Array.isArray(parsed.nodes)).toBe(true);
+    });
+
+    it('should include path ranking diagnostics in JSON context', async () => {
+      const result = await cg.buildContext('PaymentService processPayment', {
+        format: 'json',
+        searchLimit: 8,
+        traversalDepth: 1,
+        maxNodes: 20,
+      });
+      const parsed = JSON.parse(result as string);
+
+      expect(parsed.rankingDiagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            filePath: 'src/payment.ts',
+            reasons: expect.arrayContaining(['boosted source-root path']),
+          }),
+        ])
+      );
     });
 
     it('should accept object input with title and description', async () => {

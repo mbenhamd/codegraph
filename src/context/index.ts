@@ -25,7 +25,13 @@ import { GraphTraverser } from '../graph';
 import { formatContextAsMarkdown, formatContextAsJson } from './formatter';
 import { logDebug } from '../errors';
 import { validatePathWithinRoot } from '../utils';
-import { isTestFile, extractSearchTerms, scorePathRelevance, getStemVariants } from '../search/query-utils';
+import {
+  isTestFile,
+  extractSearchTerms,
+  scorePathRelevance,
+  getStemVariants,
+  getPathRankingSignals,
+} from '../search/query-utils';
 
 /**
  * Extract likely symbol names from a natural language query
@@ -246,6 +252,7 @@ export class ContextBuilder {
       codeBlockCount: codeBlocks.length,
       totalCodeSize: codeBlocks.reduce((sum, block) => sum + block.content.length, 0),
     };
+    const rankingDiagnostics = this.getRankingDiagnostics(query, relatedFiles);
 
     const context: TaskContext = {
       query,
@@ -255,6 +262,7 @@ export class ContextBuilder {
       relatedFiles,
       summary,
       stats,
+      ...(rankingDiagnostics.length > 0 ? { rankingDiagnostics } : {}),
     };
 
     // Return formatted output or raw context
@@ -265,6 +273,26 @@ export class ContextBuilder {
     }
 
     return context;
+  }
+
+  private getRankingDiagnostics(query: string, filePaths: string[]): NonNullable<TaskContext['rankingDiagnostics']> {
+    const seen = new Set<string>();
+    const diagnostics: NonNullable<TaskContext['rankingDiagnostics']> = [];
+
+    for (const filePath of filePaths) {
+      if (seen.has(filePath)) continue;
+      seen.add(filePath);
+      const signals = getPathRankingSignals(filePath, query);
+      if (signals.reasons.length === 0) continue;
+      diagnostics.push({
+        filePath,
+        scoreAdjustment: signals.scoreAdjustment,
+        reasons: signals.reasons,
+      });
+    }
+
+    diagnostics.sort((a, b) => a.scoreAdjustment - b.scoreAdjustment || a.filePath.localeCompare(b.filePath));
+    return diagnostics;
   }
 
   /**
@@ -312,6 +340,9 @@ export class ContextBuilder {
           limit: Math.ceil(opts.searchLimit * 5),
           kinds: opts.nodeKinds && opts.nodeKinds.length > 0 ? opts.nodeKinds : undefined,
         });
+        for (const result of exactMatches) {
+          result.score += getPathRankingSignals(result.node.filePath, query).scoreAdjustment;
+        }
 
         // Co-location boost: when multiple extracted symbols appear in the same file,
         // those results are much more likely to be what the user is looking for.
