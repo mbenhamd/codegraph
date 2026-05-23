@@ -9,7 +9,7 @@
  * Goals when editing this:
  *   - Tool selection by intent (which tool for which question)
  *   - Common chains (refactor planning = X then Y)
- *   - Anti-patterns (don't grep when codegraph_search is faster)
+ *   - Anti-patterns (don't start with grep when codegraph_search is faster)
  *
  * Keep it tight. The agent reads this every session — long instructions
  * burn tokens. Reference only tools that exist on `main`; gate any
@@ -17,22 +17,20 @@
  */
 export const SERVER_INSTRUCTIONS = `# Codegraph — code intelligence over an indexed knowledge graph
 
-Codegraph is a SQLite knowledge graph of every symbol, edge, and file
-in the workspace. Reads are sub-millisecond; the index lags writes by
-about a second through the file watcher. Consult it BEFORE writing or
-editing code, not during.
+Codegraph is a SQLite knowledge graph of symbols, edges, and files in
+the workspace. Reads are sub-millisecond; the index lags writes by
+about a second through the file watcher. Use it as the first pass for
+structural code questions before writing or editing code.
 
-## Answer directly — don't delegate exploration
+## Prefer direct structural exploration
 
 For "how does X work", architecture, trace, or where-is-X questions,
-answer DIRECTLY using 2-3 codegraph calls: \`codegraph_context\` first,
+answer directly with 2-3 codegraph calls: \`codegraph_context\` first,
 then ONE \`codegraph_explore\` for the source of the symbols it surfaces.
-Codegraph IS the pre-built search index — so delegating the lookup to a
-separate file-reading sub-task/agent, or running your own grep + read
-loop, repeats work codegraph already did and costs more for the same
-answer. Reach for raw Read/Grep only to confirm a specific detail
-codegraph didn't cover. A direct codegraph answer is typically a handful
-of calls; a grep/read exploration is dozens.
+This usually finds the right files faster than delegating the lookup to
+a separate file-reading sub-task/agent or running a broad grep/read
+sweep. Reach for raw Read/Grep to inspect a specific file, confirm a
+specific detail, or search literal text that codegraph does not model.
 
 ## Tool selection by intent
 
@@ -45,6 +43,7 @@ of calls; a grep/read exploration is dozens.
 - **"Show me several related symbols' source / survey an area."** → \`codegraph_explore\` (ONE capped call; prefer over many codegraph_node/Read)
 - **"What's in directory X?"** → \`codegraph_files\`
 - **"Is the index ready / what's its size?"** → \`codegraph_status\`
+- **"Where is this exact string/comment/log message?"** → native grep/read
 
 ## Common chains
 
@@ -54,7 +53,7 @@ of calls; a grep/read exploration is dozens.
 
 ## Anti-patterns
 
-- **Don't grep first** when looking up a symbol by name — \`codegraph_search\` is faster and returns kind + location + signature.
+- **Don't grep first for symbol lookup** — \`codegraph_search\` is usually faster and returns kind + location + signature.
 - **Don't chain \`codegraph_search\` + \`codegraph_node\`** when you just want context — \`codegraph_context\` is one round-trip.
 - **Don't loop \`codegraph_node\` over many symbols** — one \`codegraph_explore\` call returns them all grouped by file, while each separate call re-reads the whole context and costs far more. Use \`codegraph_node\` for a single symbol.
 - **Don't query the index immediately after editing a file** — the watcher needs ~500ms to debounce + sync. Wait for the next turn.
@@ -64,4 +63,5 @@ of calls; a grep/read exploration is dozens.
 - Index lags file writes by ~1 second.
 - Cross-file resolution is best-effort name matching; ambiguous calls may return multiple candidates.
 - No live correctness validation — that's still the TypeScript compiler / test suite / linter's job. Codegraph supplements those with structural context they don't have.
+- Verify against source, tests, or typecheck when results are surprising, low-confidence, security/production-sensitive, or edit-critical.
 `;
