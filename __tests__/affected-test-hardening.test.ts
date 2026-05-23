@@ -36,12 +36,17 @@ describe('affected-test hardening (PF-611)', () => {
 
   /**
    * BFS that mirrors the `codegraph affected` CLI's logic — start from a
-   * changed file, walk `getAffectedFileDependents` transitively, return
-   * every test file reached. Replicated here so the test exercises the
-   * graph data directly rather than shelling out to the CLI.
+   * changed file, walk dependents transitively, return every test file
+   * reached. By default uses `getAffectedFileDependents` (broader walk);
+   * pass an explicit getDeps function to test the imports-only contract.
    */
-  function affectedTestsOf(changed: string, maxDepth = 5): string[] {
+  function affectedTestsOf(
+    changed: string,
+    options: { maxDepth?: number; getDeps?: (file: string) => string[] } = {},
+  ): string[] {
     if (!cg) return [];
+    const maxDepth = options.maxDepth ?? 5;
+    const getDeps = options.getDeps ?? ((f: string) => cg!.getAffectedFileDependents(f));
     const testRe = /(?:\.|\/)(test|spec)\.[cm]?[jt]sx?$|(?:^|\/)(?:__tests__|tests?)\//;
     const isTest = (p: string) => testRe.test(p);
     const found = new Set<string>();
@@ -54,7 +59,7 @@ describe('affected-test hardening (PF-611)', () => {
     while (queue.length > 0) {
       const cur = queue.shift()!;
       if (cur.depth >= maxDepth) continue;
-      for (const dep of cg.getAffectedFileDependents(cur.file)) {
+      for (const dep of getDeps(cur.file)) {
         if (visited.has(dep)) continue;
         visited.add(dep);
         if (isTest(dep)) {
@@ -227,21 +232,26 @@ describe('affected-test hardening (PF-611)', () => {
     expect(unusedAffected).toContain('src/helpers-unused.test.ts');
     expect(unusedAffected).not.toContain('src/helpers-used.test.ts');
 
-    // Pin the two-method contract concretely (PF-611 separation of concerns):
-    //
-    //   getAffectedFileDependents walks the broader edge set and catches
-    //   direct.test.ts through the `calls` edge.
-    //
-    //   getFileDependents with the default imports-only edge set does NOT
-    //   currently catch direct.test.ts, because the tree-sitter import
-    //   extractor emits the import-statement node + a file→import-node
-    //   `imports` edge but the resolver does not always link the import
-    //   node to the target file or its exported symbol with a cross-file
-    //   `imports` edge. That import-edge wiring is a separate slice; this
-    //   assertion makes the gap CI-visible so any future fix turns the
-    //   `false` below into `true` and forces an explicit update here.
-    const importOnly = cg.getFileDependents('src/direct-impl.ts', { edgeKinds: ['imports'] });
-    expect(importOnly.includes('src/direct.test.ts')).toBe(false);
-    expect(cg.getAffectedFileDependents('src/direct-impl.ts').includes('src/direct.test.ts')).toBe(true);
+    // PF-611b — IMPORT-ONLY contract is now guaranteed transitively.
+    // The dedicated `resolveImportStatement` resolver step emits
+    // cross-file file→file `imports` edges for every pattern above,
+    // so a transitive walk that ONLY follows `imports` edges reaches
+    // every test the broader walk reaches. If the resolver regresses
+    // these mappings, the assertions below fail loudly — that's the
+    // point of pinning the contract here.
+    const importsOnlyDeps = (file: string) =>
+      cg!.getFileDependents(file, { edgeKinds: ['imports'] });
+    const importsOnlyTests = (file: string) =>
+      affectedTestsOf(file, { getDeps: importsOnlyDeps });
+    expect(importsOnlyTests('src/direct-impl.ts')).toContain('src/direct.test.ts');
+    expect(importsOnlyTests('src/b/barrel-impl.ts')).toContain('src/barrel.test.ts');
+    expect(importsOnlyTests('src/multi/inner/leaf.ts')).toContain('src/multi.test.ts');
+    expect(importsOnlyTests('src/lib/alias-impl.ts')).toContain('src/alias.test.ts');
+    expect(importsOnlyTests('src/js-spec-impl.ts')).toContain('src/js-spec.test.ts');
+
+    // Regression set must still hold under imports-only: similarly-named
+    // helpers don't cross-contaminate when only `imports` edges are walked.
+    expect(importsOnlyTests('src/helpers/used.ts')).not.toContain('src/helpers-unused.test.ts');
+    expect(importsOnlyTests('src/helpers/unused.ts')).not.toContain('src/helpers-used.test.ts');
   });
 });

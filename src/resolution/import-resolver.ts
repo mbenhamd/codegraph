@@ -614,6 +614,54 @@ export function extractReExports(content: string, language: Language): ReExport[
 }
 
 /**
+ * Resolve an import-statement reference to the target file node (PF-611b).
+ *
+ * Tree-sitter emits one unresolved reference per import statement with
+ * `referenceKind: 'imports'` and the source path as `referenceName`
+ * (e.g. `./direct-impl`, `@/lib/foo`, `./impl.js`). Without a dedicated
+ * resolver step those names never match `matchByExactName` (no node
+ * stored under that literal name) or `matchByFilePath` (file nodes are
+ * stored with their extension, so `direct-impl` doesn't equal
+ * `direct-impl.ts`). The result: file-level `imports` edges between
+ * source and target never get created.
+ *
+ * This resolver calls `resolveImportPath` (which already handles
+ * relative imports, tsconfig path aliases, `.js`→`.ts` mapping, index
+ * files, and the rest) to get the target file path, then looks up the
+ * file node by `filePath`. Confidence is high (0.95) because the path
+ * resolution is deterministic — the only way it returns wrong is if
+ * the project's resolver config is wrong.
+ *
+ * Returns null when the import path doesn't resolve to a known file
+ * (external npm package, dead path, missing file). The caller can
+ * still try other strategies in that case.
+ */
+export function resolveImportStatement(
+  ref: UnresolvedRef,
+  context: ResolutionContext
+): ResolvedRef | null {
+  // Only imports-kind refs use this resolver — calls/instantiates/etc.
+  // have completely different referenceName shapes.
+  if (ref.referenceKind !== 'imports') return null;
+
+  const resolvedPath = resolveImportPath(ref.referenceName, ref.filePath, ref.language, context);
+  if (!resolvedPath) return null;
+
+  // Find the file node for the resolved target. File nodes are keyed
+  // by their full project-relative path; the basename has extension.
+  const targetNodes = context.getNodesInFile(resolvedPath);
+  const fileNode = targetNodes.find((n) => n.kind === 'file');
+  if (!fileNode) return null;
+
+  return {
+    original: ref,
+    targetNodeId: fileNode.id,
+    confidence: 0.95,
+    resolvedBy: 'import',
+  };
+}
+
+/**
  * Resolve a reference using import mappings
  */
 export function resolveViaImport(

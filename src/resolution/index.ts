@@ -17,7 +17,7 @@ import {
   ImportMapping,
 } from './types';
 import { matchReference } from './name-matcher';
-import { resolveViaImport, extractImportMappings, extractReExports } from './import-resolver';
+import { resolveViaImport, resolveImportStatement, resolveImportPath, extractImportMappings, extractReExports } from './import-resolver';
 import { detectFrameworks } from './frameworks';
 import { loadProjectAliases, type AliasMap } from './path-aliases';
 import { logDebug } from '../errors';
@@ -475,6 +475,79 @@ export class ReferenceResolver {
   }
 
   /**
+   * Walk every file node, read its re-export statements, and synthesize a
+   * file→file `imports` edge for each `export { x } from './y'` /
+   * `export * from './y'`. The tree-sitter extractor doesn't emit a
+   * reference for the source path on a re-export — only on a real
+   * import statement — so without this pass barrels and any other
+   * re-export-only file have no incoming `imports` edges and the strict
+   * imports-only dependents walk under-reports.
+   *
+   * Runs once per full resolution (NOT per batch — that would re-walk
+   * every file node for every batch of unresolved refs). Deduplicates
+   * against edges already persisted in the DB so repeated runs don't
+   * accumulate duplicates (the edges table has no unique constraint).
+   *
+   * Public so `resolveAndPersist*` can drive it after the per-ref
+   * resolution loop completes.
+   */
+  synthesizeReExportEdges(): ResolvedRef[] {
+    const edges: ResolvedRef[] = [];
+    const fileNodes = this.queries.getNodesByKind('file');
+
+    for (const fileNode of fileNodes) {
+      const reExports = this.context.getReExports?.(fileNode.filePath, fileNode.language) ?? [];
+      if (reExports.length === 0) continue;
+
+      // Build the set of (source-fileNode → target-fileNode) pairs that
+      // already exist as `imports` edges so we don't INSERT-IGNORE
+      // duplicates (the edges table has no unique constraint, so without
+      // this dedup repeated `resolveAndPersist*` calls would accumulate
+      // duplicate rows).
+      const outgoingImports = this.queries.getOutgoingEdges(fileNode.id, ['imports']);
+      const existingTargets = new Set(outgoingImports.map((e) => e.target));
+
+      const seenSources = new Set<string>();
+      for (const rex of reExports) {
+        if (seenSources.has(rex.source)) continue;
+        seenSources.add(rex.source);
+
+        const resolvedPath = resolveImportPath(
+          rex.source,
+          fileNode.filePath,
+          fileNode.language,
+          this.context,
+        );
+        if (!resolvedPath) continue;
+
+        const targetFileNode = this.context
+          .getNodesInFile(resolvedPath)
+          .find((n) => n.kind === 'file');
+        if (!targetFileNode) continue;
+        if (targetFileNode.id === fileNode.id) continue;
+        if (existingTargets.has(targetFileNode.id)) continue;
+        existingTargets.add(targetFileNode.id);
+
+        edges.push({
+          original: {
+            fromNodeId: fileNode.id,
+            referenceName: rex.source,
+            referenceKind: 'imports',
+            line: 0,
+            column: 0,
+            filePath: fileNode.filePath,
+            language: fileNode.language,
+          },
+          targetNodeId: targetFileNode.id,
+          confidence: 0.95,
+          resolvedBy: 'import',
+        });
+      }
+    }
+    return edges;
+  }
+
+  /**
    * Check if a reference name has any possible match in the codebase.
    * Uses the pre-built knownNames set to skip expensive resolution
    * for names that definitely don't exist as symbols.
@@ -572,6 +645,23 @@ export class ReferenceResolver {
       return null;
     }
 
+    // PF-611b: import-statement references carry the source path (e.g.
+    // `./direct-impl`, `@/lib/foo`, `./impl.js`) as `referenceName`,
+    // not a project-defined symbol. The general pre-filter / name
+    // resolution pipeline can't see those — `knownNames` stores file
+    // names WITH extensions, and `matchByExactName` would never find
+    // `./direct-impl`. So they get a dedicated resolver step that
+    // calls `resolveImportPath` (which already handles relative,
+    // alias, `.js`→`.ts`, index, extension resolution) and returns
+    // the target file node.
+    if (ref.referenceKind === 'imports') {
+      const importStatement = resolveImportStatement(ref, this.context);
+      if (importStatement) return importStatement;
+      // Fall through — some imports refs may still resolve via
+      // framework / matchReference (e.g. Python `from x import y` where
+      // y is a symbol, not a path).
+    }
+
     // Fast pre-filter: skip if no symbol with this name exists anywhere
     // AND the name doesn't match a local import. The import escape is
     // necessary because re-export rename chains (`import { login }
@@ -667,12 +757,35 @@ export class ReferenceResolver {
   ): ResolutionResult {
     const result = this.resolveAll(unresolvedRefs, onProgress);
 
-    // Create edges from resolved references
+    // Create + persist normal resolved edges BEFORE synthesizing
+    // re-export edges. synthesizeReExportEdges dedupes against the DB,
+    // so inserting normal edges first makes that dedupe also catch
+    // any file that both imports and re-exports the same target in
+    // a single run (PF-611b round-2 fix).
     const edges = this.createEdges(result.resolved);
-
-    // Insert edges into database
     if (edges.length > 0) {
       this.queries.insertEdges(edges);
+    }
+
+    // PF-611b: synthesize re-export edges ONCE per full resolve (not
+    // per batch). Walks every file node and reads its content; doing
+    // it inside resolveAll() would re-walk the world on every batch.
+    // Deduplicates against edges already in the DB so repeated
+    // resolveAndPersist calls (and same-run import+re-export overlaps)
+    // don't accumulate duplicates.
+    const reExportRefs = this.synthesizeReExportEdges();
+    if (reExportRefs.length > 0) {
+      const reExportEdges = this.createEdges(reExportRefs);
+      this.queries.insertEdges(reExportEdges);
+
+      // Reflect synthesized refs in the result so the caller can see them.
+      result.resolved.push(...reExportRefs);
+      result.stats.total += reExportRefs.length;
+      result.stats.resolved += reExportRefs.length;
+      for (const r of reExportRefs) {
+        result.stats.byMethod[r.resolvedBy] =
+          (result.stats.byMethod[r.resolvedBy] || 0) + 1;
+      }
     }
 
     // Clean up resolved refs from unresolved_refs table so metrics are accurate
@@ -763,6 +876,23 @@ export class ReferenceResolver {
       // on the same rows. Break to avoid infinite loop.
       if (result.resolved.length === 0 && result.unresolved.length === batch.length) {
         break;
+      }
+    }
+
+    // PF-611b: synthesize re-export edges ONCE per full batched resolve,
+    // after all per-ref batches drain. Walks every file node and reads
+    // its content; doing it per batch would re-walk the world. Dedupes
+    // against existing imports edges in the DB, so repeated runs don't
+    // accumulate duplicates.
+    const reExportRefs = this.synthesizeReExportEdges();
+    if (reExportRefs.length > 0) {
+      const reExportEdges = this.createEdges(reExportRefs);
+      this.queries.insertEdges(reExportEdges);
+      aggregateStats.total += reExportRefs.length;
+      aggregateStats.resolved += reExportRefs.length;
+      for (const r of reExportRefs) {
+        aggregateStats.byMethod[r.resolvedBy] =
+          (aggregateStats.byMethod[r.resolvedBy] || 0) + 1;
       }
     }
 
