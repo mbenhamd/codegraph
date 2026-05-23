@@ -7,7 +7,7 @@
  *
  * CodeGraph ships with a bundled Node runtime, so `node:sqlite` (real SQLite,
  * with WAL + FTS5) is always available — there is no native build step and no
- * wasm fallback. When run from source instead, it requires Node >= 22.5.
+ * wasm fallback. When run from source instead, it requires Node >= 22.13.
  */
 
 export interface SqliteStatement {
@@ -36,12 +36,13 @@ export type SqliteBackend = 'node-sqlite';
  * better-sqlite3 interface the rest of the code expects.
  *
  * node:sqlite is real SQLite compiled into Node, so it supports WAL, FTS5,
- * mmap, and `@named` params natively — the only shims needed are the
- * better-sqlite3 conveniences node:sqlite omits: a `.pragma()` helper, a
- * `.transaction()` helper, and `open` (node:sqlite exposes `isOpen`).
+ * mmap, and `@named` params natively — the shims needed are the better-sqlite3
+ * conveniences node:sqlite omits: a `.pragma()` helper, a `.transaction()`
+ * helper, stable bare named parameter binding, and idempotent `open`/`close`.
  */
 class NodeSqliteAdapter implements SqliteDatabase {
   private _db: any;
+  private closed = false;
 
   constructor(dbPath: string) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -50,14 +51,15 @@ class NodeSqliteAdapter implements SqliteDatabase {
   }
 
   get open(): boolean {
-    return this._db.isOpen;
+    return !this.closed;
   }
 
   prepare(sql: string): SqliteStatement {
-    // node:sqlite matches better-sqlite3's calling convention (variadic
-    // positional args, or a single object for @named params), so params forward
-    // through unchanged.
     const stmt = this._db.prepare(sql);
+    // Node 22.13-22.17 require this per statement for `{ id }` to bind `@id`.
+    // Newer Node releases allow it by default, but keeping the explicit call
+    // makes the adapter's better-sqlite3-shaped API stable across the floor.
+    stmt.setAllowBareNamedParameters?.(true);
     return {
       run(...params: any[]) {
         const r = stmt.run(...params);
@@ -111,9 +113,11 @@ class NodeSqliteAdapter implements SqliteDatabase {
   }
 
   close(): void {
-    // node:sqlite's DatabaseSync.close() throws if already closed; make it
-    // idempotent to match better-sqlite3 (callers may close more than once).
-    if (this._db.isOpen) this._db.close();
+    // node:sqlite's DatabaseSync.close() throws if already closed; track our own
+    // state so this remains idempotent on every supported Node 22 release.
+    if (this.closed) return;
+    this._db.close();
+    this.closed = true;
   }
 }
 
@@ -131,8 +135,8 @@ export function createDatabase(dbPath: string): { db: SqliteDatabase; backend: S
     const msg = error instanceof Error ? error.message : String(error);
     throw new Error(
       'Failed to open SQLite via the built-in node:sqlite module.\n' +
-      'CodeGraph requires node:sqlite (Node.js 22.5+). Install the self-contained\n' +
-      'CodeGraph release (it bundles a compatible Node), or run on Node 22.5+.\n' +
+      'CodeGraph requires node:sqlite (Node.js 22.13+). Install the self-contained\n' +
+      'CodeGraph release (it bundles a compatible Node), or run on Node 22.13+.\n' +
       `Underlying error: ${msg}`
     );
   }

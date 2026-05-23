@@ -10,6 +10,13 @@ Distributed as `@colbymchenry/codegraph` on npm; same binary serves as installer
 
 ## Build, Test, Run
 
+Use the repo-pinned Node version before installing dependencies:
+
+```bash
+nvm install
+nvm use
+```
+
 ```bash
 npm run build           # tsc + copy schema.sql and *.wasm into dist/; chmods dist/bin/codegraph.js
 npm run dev             # tsc --watch
@@ -17,19 +24,23 @@ npm run clean           # rm -rf dist
 
 npm test                # vitest run (all)
 npm run test:watch
-npm run test:eval       # only __tests__/evaluation/
-npm run eval            # build then run __tests__/evaluation/runner.ts via tsx
+npm run test:eval -- .  # run __tests__/evaluation/runner.ts against an indexed repo
+npm run eval -- .       # build, then run the evaluation runner
 
 npm run cli             # build then run the local dist binary
 
 # Single test file / pattern
-npx vitest run __tests__/installer-targets.test.ts
-npx vitest run __tests__/extraction.test.ts -t "TypeScript"
+npm test -- __tests__/installer-targets.test.ts
+npm test -- __tests__/extraction.test.ts -t "TypeScript"
 ```
+
+Use the npm scripts for full-suite validation. They launch Vitest and the
+evaluation runner with the WASM-safe runtime flag required on Node 22/24; bare
+`vitest` or `tsx` can still crash while compiling tree-sitter grammars.
 
 `copy-assets` (called from `build`) copies `src/db/schema.sql` and all `src/extraction/wasm/*.wasm` files into `dist/`. **Any new SQL or grammar wasm must be copied or it won't ship.**
 
-Node engines: `>=18.0.0 <25.0.0`. There is a hard exit on Node 25.x (see `src/bin/node-version-check.ts`).
+Node engines: `>=22.13.0 <25.0.0`. Local development is pinned by `.nvmrc` / `.node-version`; Node 25.x hard-exits because of a V8 WASM JIT crash during tree-sitter grammar compilation (see `src/bin/node-version-check.ts`).
 
 ## Architecture
 
@@ -50,7 +61,7 @@ The public API surface is `src/index.ts` — the `CodeGraph` class wires all the
 ### Module layout
 
 - `src/index.ts` — `CodeGraph` class: `init`/`open`/`close`, `indexAll`, `sync`, `searchNodes`, `getCallers`/`getCallees`, `getImpactRadius`, `buildContext`, `watch`/`unwatch`.
-- `src/db/` — `DatabaseConnection`, `QueryBuilder` (prepared statements), `schema.sql`. Backed by `better-sqlite3` (native) when available, transparently falls back to `node-sqlite3-wasm`. `codegraph status` surfaces which backend is live; wasm is the slow path.
+- `src/db/` — `DatabaseConnection`, `QueryBuilder` (prepared statements), `schema.sql`. Backed by Node's built-in `node:sqlite` with WAL/FTS5; source runs require Node `>=22.13`, while released bundles ship a compatible Node runtime.
 - `src/extraction/` — `ExtractionOrchestrator`, tree-sitter wrappers, per-language extractors under `languages/` (one file per language), plus standalone extractors for non-tree-sitter formats (`svelte-extractor.ts`, `vue-extractor.ts`, `liquid-extractor.ts`, `dfm-extractor.ts` for Delphi). `parse-worker.ts` runs heavy parsing off the main thread.
 - `src/resolution/` — `ReferenceResolver` orchestrates `import-resolver.ts` (with `path-aliases.ts` for tsconfig path aliases + cargo workspace member globs), `name-matcher.ts`, and `frameworks/` (Express, Laravel, Rails, FastAPI, Django, Flask, Spring, Gin, Axum, ASP.NET, Vapor, React Router, SvelteKit, Vue/Nuxt, Cargo workspaces). Frameworks emit `route` nodes and `references` edges.
 - `src/graph/` — `GraphTraverser` (BFS/DFS, impact radius, path finding) and `GraphQueryManager` (high-level queries).
@@ -141,7 +152,7 @@ Releases are built and published by the **GitHub Actions "Release" workflow**
 (`scripts/build-bundle.sh`) and publishes both the GitHub Release and the npm
 thin-installer (`scripts/pack-npm.sh`: a shim package + per-platform packages).
 Publishing manually is **wrong** now — a plain `npm publish` ships the root
-package (non-bundled), which breaks anyone on Node < 22.5.
+package (non-bundled), which breaks anyone on Node < 22.13.
 
 After the changelog entry is written and `package.json` is bumped:
 

@@ -18,10 +18,10 @@
     "copy-assets": "node -e \"const fs=require('fs');fs.mkdirSync('dist/db',{recursive:true});fs.copyFileSync('src/db/schema.sql','dist/db/schema.sql');fs.mkdirSync('dist/extraction/wasm',{recursive:true});fs.readdirSync('src/extraction/wasm').filter(f=>f.endsWith('.wasm')).forEach(f=>fs.copyFileSync('src/extraction/wasm/'+f,'dist/extraction/wasm/'+f))\"",
     "dev": "tsc --watch",
     "cli": "npm run build && node dist/bin/codegraph.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:eval": "vitest run __tests__/evaluation/",
-    "eval": "npm run build && npx tsx __tests__/evaluation/runner.ts",
+    "test": "node --liftoff-only ./node_modules/vitest/vitest.mjs run",
+    "test:watch": "node --liftoff-only ./node_modules/vitest/vitest.mjs",
+    "test:eval": "node --liftoff-only ./node_modules/tsx/dist/cli.mjs __tests__/evaluation/runner.ts",
+    "eval": "npm run build && npm run test:eval --",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
   },
   "keywords": [
@@ -47,10 +47,11 @@
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^20.19.30",
     "@types/picomatch": "^4.0.2",
+    "tsx": "^4.22.3",
     "typescript": "^5.0.0",
     "vitest": "^2.1.9"
   },
   "engines": {
-    "node": ">=20.0.0 <25.0.0"
+    "node": ">=22.13.0 <25.0.0"
   }
 }

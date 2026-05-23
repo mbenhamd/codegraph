@@ -1,6 +1,6 @@
 # Distribution: self-contained bundles
 
-CodeGraph ships a **vendored Node runtime** alongside the app. Because Node 22.5+
+CodeGraph ships a **vendored Node runtime** alongside the app. Because Node 22.13+
 has a built-in real SQLite (`node:sqlite`, with WAL + FTS5), bundling Node means:
 
 - **No native build** — `better-sqlite3` is gone, so there are zero native addons
@@ -68,7 +68,8 @@ Still TODO:
 - **Code signing** — the main gap for "download & run": macOS Gatekeeper needs a
   Developer ID + notarization; Windows needs Authenticode. Homebrew softens the
   macOS case (handles quarantine).
-- Retire the now-vestigial Node-version gate in `src/bin/codegraph.ts` — the
-  bundle always runs Node 24, and the npm shim does no tree-sitter work.
+- Keep source-only Node-version gates aligned with the bundled runtime policy:
+  the bundle always runs Node 24, while direct source/dist launches still need a
+  clear `>=22.13 <25` guard.
 - Re-wire `npm uninstall` cleanup (the agent-config `preuninstall`) through the
   shim — the generated main package doesn't carry it.

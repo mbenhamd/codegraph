@@ -20,6 +20,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   observed at startup; the poll interval is `CODEGRAPH_PPID_POLL_MS` (default
   `5000`, `0` disables). Resolves
   [#277](https://github.com/colbymchenry/codegraph/issues/277).
+- **Source checkouts now fail fast on unsupported Node versions.** Direct source
+  and `dist` runs require Node.js `>=22.13 <25` because `node:sqlite` is the
+  supported local database backend and Node 25 still triggers the V8 WASM JIT
+  crash while compiling tree-sitter grammars. The repo now pins Node 24.16.0 for
+  contributors, documents the source setup, and runs Vitest/evaluation scripts
+  with `--liftoff-only` so local validation matches the CLI's safe runtime mode.
 
 ### Added
 - **Release archives now ship with a `SHA256SUMS` file**, and the npm launcher
