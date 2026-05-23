@@ -383,7 +383,7 @@ codegraph affected src/auth.ts --filter "e2e/*"     # Custom test file pattern
 #!/usr/bin/env bash
 AFFECTED=$(git diff --name-only HEAD | codegraph affected --stdin --quiet)
 if [ -n "$AFFECTED" ]; then
-  npx vitest run $AFFECTED
+  npm test -- $AFFECTED
 fi
 ```
 
@@ -463,6 +463,27 @@ compile) for all three desktop OSes, on both Intel/AMD (x64) and ARM (arm64):
 | Linux | x64, arm64 | shell installer or npm |
 
 See [Get Started](#get-started) for the one-line install commands.
+
+## Developing From Source
+
+Use a supported Node.js release before running local validation:
+
+```bash
+nvm install
+nvm use
+npm ci
+npm run build
+npm test
+npm run test:eval -- /path/to/indexed/repo
+```
+
+The source tree supports Node.js `>=22.13 <25` and pins the recommended local
+version in `.nvmrc` / `.node-version`. Node 25.x is blocked by the CLI because a
+V8 WASM JIT bug can crash tree-sitter grammar compilation during indexing.
+Repository test scripts launch Vitest and the evaluation runner with the same
+WASM-safe runtime flag used by the CLI, so prefer `npm test` /
+`npm run test:eval -- <indexed-repo>` over bare `vitest` or `tsx`.
+Released installs bundle their own runtime, so end users do not need this setup.
 
 ## Supported Agents
 

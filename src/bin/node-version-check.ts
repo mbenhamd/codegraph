@@ -28,9 +28,9 @@ export function buildNode25BlockBanner(nodeVersion: string): string {
     'compiles tree-sitter grammars. CodeGraph WILL crash on this Node',
     'version mid-indexing. See https://github.com/colbymchenry/codegraph/issues/81',
     '',
-    'Fix: install Node.js 22 LTS:',
-    '  nvm install 22 && nvm use 22                          # nvm',
-    '  brew install node@22 && brew link --overwrite --force node@22  # Homebrew',
+    'Fix: install a supported Node.js LTS (24 recommended, 22 also supported):',
+    '  nvm install 24 && nvm use 24                          # explicit nvm',
+    '  brew install node@24 && brew link --overwrite --force node@24  # Homebrew',
     '',
     'To override (NOT recommended - you will likely OOM):',
     '  CODEGRAPH_ALLOW_UNSAFE_NODE=1 codegraph ...',
@@ -39,17 +39,31 @@ export function buildNode25BlockBanner(nodeVersion: string): string {
 }
 
 /**
- * Lowest supported Node.js major version. Matches the `engines` floor in
- * package.json. Below this, CodeGraph relies on language features / native APIs
- * that aren't present, and the combination is untested. `engines` alone only
- * *warns* on install (unless the user set `engine-strict`), so the CLI bootstrap
- * also hard-blocks here to actually enforce the floor.
+ * Lowest supported Node.js version. Matches the `engines` floor in package.json.
+ * Below this, CodeGraph or its runtime dependencies rely on language features /
+ * native APIs that aren't present, and the combination is untested. `engines`
+ * alone only *warns* on install (unless the user set `engine-strict`), so the CLI
+ * bootstrap also hard-blocks here to actually enforce the floor.
  */
-export const MIN_NODE_MAJOR = 20;
+export const MIN_NODE_VERSION = '22.13.0';
+
+export function isNodeVersionBelowMinimum(nodeVersion: string): boolean {
+  const actual = nodeVersion.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const minimum = MIN_NODE_VERSION.split('.').map((part) => Number.parseInt(part, 10) || 0);
+
+  for (let i = 0; i < minimum.length; i += 1) {
+    const actualPart = actual[i] ?? 0;
+    const minimumPart = minimum[i] ?? 0;
+    if (actualPart < minimumPart) return true;
+    if (actualPart > minimumPart) return false;
+  }
+
+  return false;
+}
 
 /**
- * Build the bordered banner shown when CodeGraph detects a Node.js major below
- * {@link MIN_NODE_MAJOR}. Pinned via unit test so the recovery commands and the
+ * Build the bordered banner shown when CodeGraph detects a Node.js version below
+ * {@link MIN_NODE_VERSION}. Pinned via unit test so the recovery commands and the
  * override env var can't be silently stripped by future edits.
  *
  * Uses ASCII glyphs to stay readable on Windows OEM-codepage consoles
@@ -61,13 +75,13 @@ export function buildNodeTooOldBanner(nodeVersion: string): string {
     sep,
     `[CodeGraph] Unsupported Node.js version: ${nodeVersion}`,
     sep,
-    `CodeGraph requires Node.js ${MIN_NODE_MAJOR} or newer. Older versions lack`,
-    'language features and native APIs CodeGraph depends on, and are not',
+    `CodeGraph requires Node.js ${MIN_NODE_VERSION} or newer. Older versions lack`,
+    'language features or dependency support CodeGraph depends on, and are not',
     'tested or supported.',
     '',
-    'Fix: install Node.js 22 LTS:',
-    '  nvm install 22 && nvm use 22                          # nvm',
-    '  brew install node@22 && brew link --overwrite --force node@22  # Homebrew',
+    'Fix: install a supported Node.js LTS (24 recommended, 22 also supported):',
+    '  nvm install 24 && nvm use 24                          # explicit nvm',
+    '  brew install node@24 && brew link --overwrite --force node@24  # Homebrew',
     '',
     'To override (NOT recommended - unsupported):',
     '  CODEGRAPH_ALLOW_UNSAFE_NODE=1 codegraph ...',

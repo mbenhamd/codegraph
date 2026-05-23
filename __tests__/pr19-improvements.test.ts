@@ -45,7 +45,7 @@ function cleanupTempDir(dir: string): void {
   }
 }
 
-// Check if the node:sqlite backend is available (Node >= 22.5)
+// Check if the node:sqlite backend is available for CodeGraph's source runtime.
 function hasSqliteBindings(): boolean {
   try {
     const { DatabaseSync } = require('node:sqlite');

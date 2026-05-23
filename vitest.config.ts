@@ -5,6 +5,12 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['__tests__/**/*.test.ts'],
+    pool: 'forks',
+    poolOptions: {
+      forks: {
+        execArgv: ['--liftoff-only'],
+      },
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

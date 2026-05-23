@@ -29,8 +29,15 @@ import { getCodeGraphDir, isInitialized } from '../directory';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
 
-import { buildNode25BlockBanner, buildNodeTooOldBanner, MIN_NODE_MAJOR } from './node-version-check';
-import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
+import {
+  buildNode25BlockBanner,
+  buildNodeTooOldBanner,
+  isNodeVersionBelowMinimum,
+} from './node-version-check';
+import {
+  RELAUNCH_GUARD_ENV,
+  relaunchWithWasmRuntimeFlagsIfNeeded,
+} from '../extraction/wasm-runtime-flags';
 
 // Lazy-load heavy modules (CodeGraph, runInstaller) to keep CLI startup fast.
 async function loadCodeGraph(): Promise<typeof import('../index')> {
@@ -61,22 +68,28 @@ const importESM = new Function('specifier', 'return import(specifier)') as
 // who patched V8 themselves or want to test a future fix.
 const nodeVersion = process.versions.node;
 const nodeMajor = parseInt(nodeVersion.split('.')[0] ?? '0', 10);
+const hasUnsafeNodeOverride = Boolean(process.env.CODEGRAPH_ALLOW_UNSAFE_NODE);
+const shouldShowCompatibilityBanner = !process.env[RELAUNCH_GUARD_ENV] || !hasUnsafeNodeOverride;
 if (nodeMajor >= 25) {
-  process.stderr.write(buildNode25BlockBanner(nodeVersion) + '\n');
-  if (!process.env.CODEGRAPH_ALLOW_UNSAFE_NODE) {
+  if (shouldShowCompatibilityBanner) {
+    process.stderr.write(buildNode25BlockBanner(nodeVersion) + '\n');
+  }
+  if (!hasUnsafeNodeOverride) {
     process.exit(1);
   }
-  // Override active — banner shown for visibility, continuing.
+  // Override active; continue after showing the banner on the direct launch path.
 }
 // Enforce the supported Node floor. `engines` in package.json only *warns* on
 // install (unless engine-strict), so hard-block here to actually keep users off
 // unsupported versions. Mirrors the 25+ block above. See package.json `engines`.
-if (nodeMajor < MIN_NODE_MAJOR) {
-  process.stderr.write(buildNodeTooOldBanner(nodeVersion) + '\n');
-  if (!process.env.CODEGRAPH_ALLOW_UNSAFE_NODE) {
+if (isNodeVersionBelowMinimum(nodeVersion)) {
+  if (shouldShowCompatibilityBanner) {
+    process.stderr.write(buildNodeTooOldBanner(nodeVersion) + '\n');
+  }
+  if (!hasUnsafeNodeOverride) {
     process.exit(1);
   }
-  // Override active — banner shown for visibility, continuing.
+  // Override active; continue after showing the banner on the direct launch path.
 }
 
 // Re-exec with V8's `--liftoff-only` if it isn't already set, so tree-sitter's

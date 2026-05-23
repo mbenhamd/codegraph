@@ -5,7 +5,7 @@
  * a real index + queries through it, so WAL, FTS5 search, and @named-param
  * writes are all exercised end-to-end.
  *
- * Skipped on Node < 22.5 where node:sqlite doesn't exist.
+ * Skipped when node:sqlite isn't available in the running Node.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
