@@ -221,6 +221,8 @@ function numberSourceLines(slice: string, firstLineNumber: number): string {
  * argv, or telemetry the attack becomes trivial, and the right fix is to not
  * follow links from /tmp paths in the first place.
  */
+import { formatEdgeProvenance } from '../edge-provenance';
+
 function markSessionConsulted(sessionId: string): void {
   try {
     const hash = createHash('md5').update(sessionId).digest('hex').slice(0, 16);
@@ -850,12 +852,12 @@ export class ToolHandler {
 
     // Aggregate callers across all matching symbols
     const seen = new Set<string>();
-    const allCallers: Node[] = [];
+    const allCallers: Array<{ node: Node; edge?: Edge }> = [];
     for (const node of allMatches.nodes) {
       for (const c of cg.getCallers(node.id)) {
         if (!seen.has(c.node.id)) {
           seen.add(c.node.id);
-          allCallers.push(c.node);
+          allCallers.push({ node: c.node, edge: c.edge });
         }
       }
     }
@@ -885,12 +887,12 @@ export class ToolHandler {
 
     // Aggregate callees across all matching symbols
     const seen = new Set<string>();
-    const allCallees: Node[] = [];
+    const allCallees: Array<{ node: Node; edge?: Edge }> = [];
     for (const node of allMatches.nodes) {
       for (const c of cg.getCallees(node.id)) {
         if (!seen.has(c.node.id)) {
           seen.add(c.node.id);
-          allCallees.push(c.node);
+          allCallees.push({ node: c.node, edge: c.edge });
         }
       }
     }
@@ -1856,13 +1858,18 @@ export class ToolHandler {
     return lines.join('\n');
   }
 
-  private formatNodeList(nodes: Node[], title: string): string {
-    const lines: string[] = [`## ${title} (${nodes.length} found)`, ''];
+  private formatNodeList(
+    entries: Array<{ node: Node; edge?: Edge }>,
+    title: string,
+  ): string {
+    const lines: string[] = [`## ${title} (${entries.length} found)`, ''];
 
-    for (const node of nodes) {
+    for (const { node, edge } of entries) {
       const location = node.startLine ? `:${node.startLine}` : '';
-      // Compact: just name, kind, location
-      lines.push(`- ${node.name} (${node.kind}) - ${node.filePath}${location}`);
+      const provenance = formatEdgeProvenance(edge);
+      const suffix = provenance ? ` ${provenance}` : '';
+      // Compact: name, kind, location, optional [resolvedBy confidence]
+      lines.push(`- ${node.name} (${node.kind}) - ${node.filePath}${location}${suffix}`);
     }
 
     return lines.join('\n');

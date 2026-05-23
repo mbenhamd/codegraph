@@ -28,6 +28,8 @@ import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getCodeGraphDir, isInitialized } from '../directory';
+import { extractEdgeProvenance, formatEdgeProvenance } from '../edge-provenance';
+import type { Edge } from '../types';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
 
@@ -207,6 +209,79 @@ function resolveProjectPath(pathArg?: string): string {
 function formatNumber(n: number): string {
   return n.toLocaleString();
 }
+
+/**
+ * Shared collector for the CLI `callers` / `callees` subcommands. Walks the
+ * search matches, applies the exact-match-when-multiple filter, and
+ * deduplicates by node id keeping the highest-confidence edge for each
+ * neighbour. Returns plain JSON-serializable entries (resolver metadata is
+ * flattened to `confidence` / `resolvedBy`) plus a private `_edge` carrying
+ * the raw edge for terminal rendering.
+ */
+type GraphRelationEntry = {
+  name: string;
+  kind: string;
+  filePath: string;
+  startLine?: number;
+  confidence?: number;
+  resolvedBy?: string;
+  /** Raw edge — internal; stripped from JSON via the toJSON hook below. */
+  _edge?: Edge;
+  toJSON?: () => unknown;
+};
+
+function collectGraphRelations(
+  matches: ReadonlyArray<{ node: { id: string; name: string } }>,
+  symbol: string,
+  fetch: (nodeId: string) => Array<{ node: { id: string; name: string; kind: string; filePath: string; startLine?: number }; edge: Edge }>
+): GraphRelationEntry[] {
+  const byId = new Map<string, { entry: GraphRelationEntry; confidence: number }>();
+
+  const ingest = (results: ReturnType<typeof fetch>) => {
+    for (const { node, edge } of results) {
+      const prov = extractEdgeProvenance(edge);
+      const confidence = prov.confidence ?? -Infinity;
+      const existing = byId.get(node.id);
+      if (existing && existing.confidence >= confidence) continue;
+      const entry: GraphRelationEntry = {
+        name: node.name,
+        kind: node.kind,
+        filePath: node.filePath,
+        ...(node.startLine !== undefined ? { startLine: node.startLine } : {}),
+        ...(prov.confidence !== undefined ? { confidence: prov.confidence } : {}),
+        ...(prov.resolvedBy ? { resolvedBy: prov.resolvedBy } : {}),
+        _edge: edge,
+      };
+      // Hide _edge from JSON output without losing it for terminal rendering.
+      Object.defineProperty(entry, 'toJSON', {
+        value: () => {
+          const { _edge, toJSON, ...rest } = entry;
+          void _edge; void toJSON;
+          return rest;
+        },
+        enumerable: false,
+      });
+      byId.set(node.id, { entry, confidence });
+    }
+  };
+
+  for (const match of matches) {
+    const exactMatch =
+      match.node.name === symbol ||
+      match.node.name.endsWith(`.${symbol}`) ||
+      match.node.name.endsWith(`::${symbol}`);
+    if (!exactMatch && matches.length > 1) continue;
+    ingest(fetch(match.node.id));
+  }
+
+  // Fallback: if exact filter removed everything, use the top match.
+  if (byId.size === 0 && matches[0]) {
+    ingest(fetch(matches[0].node.id));
+  }
+
+  return [...byId.values()].map((v) => v.entry);
+}
+
 
 /**
  * Format duration in milliseconds to human readable
@@ -1501,31 +1576,13 @@ program
         return;
       }
 
-      const seen = new Set<string>();
-      const allCallers: Array<{ name: string; kind: string; filePath: string; startLine?: number }> = [];
+      const grouped = collectGraphRelations(
+        matches,
+        symbol,
+        (id) => cg.getCallers(id)
+      );
 
-      for (const match of matches) {
-        const exactMatch = match.node.name === symbol || match.node.name.endsWith(`.${symbol}`) || match.node.name.endsWith(`::${symbol}`);
-        if (!exactMatch && matches.length > 1) continue;
-        for (const c of cg.getCallers(match.node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallers.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
-        }
-      }
-
-      // Fallback: if exact filter removed everything, use the top match
-      if (allCallers.length === 0 && matches[0]) {
-        for (const c of cg.getCallers(matches[0].node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallers.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
-        }
-      }
-
-      const limited = allCallers.slice(0, limit);
+      const limited = grouped.slice(0, limit);
 
       if (options.json) {
         console.log(JSON.stringify({ symbol, callers: limited }, null, 2));
@@ -1533,13 +1590,15 @@ program
         info(`No callers found for "${symbol}"`);
       } else {
         console.log(chalk.bold(`\nCallers of "${symbol}" (${limited.length}):\n`));
-        for (const node of limited) {
-          const loc = node.startLine ? `:${node.startLine}` : '';
+        for (const entry of limited) {
+          const loc = entry.startLine ? `:${entry.startLine}` : '';
+          const provenance = formatEdgeProvenance(entry._edge);
           console.log(
-            chalk.cyan(node.kind.padEnd(12)) +
-            chalk.white(node.name)
+            chalk.cyan(entry.kind.padEnd(12)) +
+            chalk.white(entry.name) +
+            (provenance ? '  ' + chalk.dim(provenance) : '')
           );
-          console.log(chalk.dim(`  ${node.filePath}${loc}`));
+          console.log(chalk.dim(`  ${entry.filePath}${loc}`));
           console.log();
         }
       }
@@ -1580,30 +1639,13 @@ program
         return;
       }
 
-      const seen = new Set<string>();
-      const allCallees: Array<{ name: string; kind: string; filePath: string; startLine?: number }> = [];
+      const grouped = collectGraphRelations(
+        matches,
+        symbol,
+        (id) => cg.getCallees(id)
+      );
 
-      for (const match of matches) {
-        const exactMatch = match.node.name === symbol || match.node.name.endsWith(`.${symbol}`) || match.node.name.endsWith(`::${symbol}`);
-        if (!exactMatch && matches.length > 1) continue;
-        for (const c of cg.getCallees(match.node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallees.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
-        }
-      }
-
-      if (allCallees.length === 0 && matches[0]) {
-        for (const c of cg.getCallees(matches[0].node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallees.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
-        }
-      }
-
-      const limited = allCallees.slice(0, limit);
+      const limited = grouped.slice(0, limit);
 
       if (options.json) {
         console.log(JSON.stringify({ symbol, callees: limited }, null, 2));
@@ -1611,13 +1653,15 @@ program
         info(`No callees found for "${symbol}"`);
       } else {
         console.log(chalk.bold(`\nCallees of "${symbol}" (${limited.length}):\n`));
-        for (const node of limited) {
-          const loc = node.startLine ? `:${node.startLine}` : '';
+        for (const entry of limited) {
+          const loc = entry.startLine ? `:${entry.startLine}` : '';
+          const provenance = formatEdgeProvenance(entry._edge);
           console.log(
-            chalk.cyan(node.kind.padEnd(12)) +
-            chalk.white(node.name)
+            chalk.cyan(entry.kind.padEnd(12)) +
+            chalk.white(entry.name) +
+            (provenance ? '  ' + chalk.dim(provenance) : '')
           );
-          console.log(chalk.dim(`  ${node.filePath}${loc}`));
+          console.log(chalk.dim(`  ${entry.filePath}${loc}`));
           console.log();
         }
       }

@@ -393,6 +393,35 @@ that directory already exists without `codegraph.db`, cleanup refuses to run
 unless `--force` makes the destructive intent explicit. `--reindex` also
 requires `--force` when a previous index exists.
 
+### Edge confidence and resolver provenance
+
+`codegraph callers` and `codegraph callees` (and their MCP counterparts
+`codegraph_callers` / `codegraph_callees`) now surface the resolver
+metadata stored on each graph edge so agents can distinguish strong
+import/framework-resolved links from fuzzy or low-confidence matches.
+
+Text output: each line gets a compact `[resolvedBy confidence]` suffix.
+JSON output: each entry gains optional `resolvedBy` (string) and
+`confidence` (number in `[0, 1]`) fields.
+
+The `resolvedBy` values:
+
+| Value | Meaning |
+|-------|---------|
+| `import` | Link followed from an import statement in the caller's file. |
+| `framework` | Framework resolver (Express route → handler, etc.). |
+| `qualified-name` | Fully-qualified or `Module::method` style match. |
+| `exact-match` | Same-name node match; confidence varies with proximity. |
+| `instance-method` | Receiver-name + method-name heuristic match. |
+| `file-path` | Path-like reference resolved to a file node. |
+| `fuzzy` | Last-resort lowercase-name match; lowest confidence. |
+
+Confidence is a number in `[0, 1]`. Treat `≥ 0.9` as strong
+(framework/import/qualified-name resolution the resolver is sure
+about), `0.7–0.9` as likely-correct same-module matches, `0.4–0.7` as
+cross-module matches worth verifying, and `< 0.4` as suggestions you
+should double-check against source.
+
 ### `codegraph affected`
 
 Traces import dependencies transitively to find which test files are affected by changed source files.
