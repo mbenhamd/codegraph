@@ -1880,7 +1880,7 @@ program
           const current = queue.shift()!;
           if (current.depth >= maxDepth) continue;
 
-          const dependents = cg.getFileDependents(current.file);
+          const dependents = cg.getAffectedFileDependents(current.file);
           for (const dep of dependents) {
             if (visited.has(dep)) continue;
             visited.add(dep);
