@@ -137,43 +137,86 @@ export class GraphQueryManager {
   }
 
   /**
-   * Get dependents of a file
-   *
-   * Returns all files that import from this file.
-   *
-   * @param filePath - Path to the file
-   * @returns Array of file paths that depend on this file
+   * Edge kinds walked by `getAffectedFileDependents` (PF-611). Includes
+   * every reference-type edge codegraph emits, so call/usage relationships
+   * count even when no file-level import statement was extracted.
    */
-  getFileDependents(filePath: string): string[] {
+  private static readonly AFFECTED_EDGE_KINDS: EdgeKind[] = [
+    'imports',
+    'calls',
+    'references',
+    'instantiates',
+    'extends',
+    'implements',
+    'decorates',
+  ];
+
+  /**
+   * Get dependents of a file.
+   *
+   * Returns the set of project files that depend on `filePath` via
+   * file-level or node-level `imports` edges. Stable contract: existing
+   * callers (circular-dependency, dead-code, external library users)
+   * continue to see import-only dependents.
+   *
+   * Use `getAffectedFileDependents` (or pass
+   * `{ edgeKinds: [...] }` explicitly) when you want the broader walk
+   * that also follows call/usage edges (PF-611 affected-test traversal).
+   *
+   * @param filePath - Path to the file (project-root-relative).
+   * @param options.edgeKinds - Override the edge kinds considered.
+   *   Defaults to `['imports']`.
+   * @returns Array of file paths that depend on this file.
+   */
+  getFileDependents(filePath: string, options?: { edgeKinds?: EdgeKind[] }): string[] {
     const nodes = this.queries.getNodesByFile(filePath);
     const dependents = new Set<string>();
+    const edgeKinds: EdgeKind[] = options?.edgeKinds ?? ['imports'];
 
-    // Check file-level incoming import edges (file:X imports file:Y)
+    const addDependent = (sourceId: string) => {
+      const sourceNode = this.queries.getNodeById(sourceId);
+      if (sourceNode && sourceNode.filePath !== filePath) {
+        dependents.add(sourceNode.filePath);
+      }
+    };
+
+    // File-level incoming edges (e.g. file:X imports file:Y).
     const fileNode = nodes.find((n) => n.kind === 'file');
     if (fileNode) {
-      const incomingFileEdges = this.queries.getIncomingEdges(fileNode.id, ['imports']);
-      for (const edge of incomingFileEdges) {
-        const sourceNode = this.queries.getNodeById(edge.source);
-        if (sourceNode && sourceNode.filePath !== filePath) {
-          dependents.add(sourceNode.filePath);
-        }
+      for (const edge of this.queries.getIncomingEdges(fileNode.id, edgeKinds)) {
+        addDependent(edge.source);
       }
     }
 
-    // Also check node-level imports of exported symbols
+    // Node-level incoming edges into any exported symbol in this file.
+    // Tests, callers, and direct usages of an exported function/class show
+    // up here even when no file-level `imports` edge exists.
     for (const node of nodes) {
-      if (node.isExported) {
-        const incomingEdges = this.queries.getIncomingEdges(node.id, ['imports']);
-        for (const edge of incomingEdges) {
-          const sourceNode = this.queries.getNodeById(edge.source);
-          if (sourceNode && sourceNode.filePath !== filePath) {
-            dependents.add(sourceNode.filePath);
-          }
-        }
+      if (!node.isExported) continue;
+      for (const edge of this.queries.getIncomingEdges(node.id, edgeKinds)) {
+        addDependent(edge.source);
       }
     }
 
     return Array.from(dependents);
+  }
+
+  /**
+   * Affected-test-style dependents (PF-611). Walks `imports` AND every
+   * reference-type edge (`calls`, `references`, `instantiates`, `extends`,
+   * `implements`, `decorates`) so file dependencies expressed only via
+   * call/usage relationships are caught alongside explicit imports.
+   *
+   * Used by `codegraph affected` to find every test file reachable from
+   * a changed source file, including dependencies routed through barrels,
+   * tsconfig path aliases, `.js`-specifier-to-`.ts`-source resolution,
+   * and other patterns where the call edge resolves but the file-level
+   * import edge does not.
+   */
+  getAffectedFileDependents(filePath: string): string[] {
+    return this.getFileDependents(filePath, {
+      edgeKinds: GraphQueryManager.AFFECTED_EDGE_KINDS,
+    });
   }
 
   /**

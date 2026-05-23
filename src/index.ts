@@ -9,6 +9,7 @@ import * as path from 'path';
 import {
   Node,
   Edge,
+  EdgeKind,
   FileRecord,
   ExtractionResult,
   Subgraph,
@@ -827,10 +828,27 @@ export class CodeGraph {
    * Get dependents of a file
    *
    * @param filePath - Path to the file
+   * @param options.edgeKinds - Override the edge kinds considered.
+   *   Defaults to `['imports']` for backwards compatibility. Use
+   *   `getAffectedFileDependents` for the broader PF-611 walk.
    * @returns Array of file paths that depend on this file
    */
-  getFileDependents(filePath: string): string[] {
-    return this.graphManager.getFileDependents(filePath);
+  getFileDependents(filePath: string, options?: { edgeKinds?: EdgeKind[] }): string[] {
+    return this.graphManager.getFileDependents(filePath, options);
+  }
+
+  /**
+   * Affected-test-style dependents (PF-611). Walks `imports` plus every
+   * reference-type edge (`calls`, `references`, `instantiates`, `extends`,
+   * `implements`, `decorates`) so file dependencies expressed only via
+   * call/usage relationships are caught alongside explicit imports.
+   *
+   * @param filePath - Path to the file
+   * @returns Array of file paths that depend on this file via any
+   *   reference relationship.
+   */
+  getAffectedFileDependents(filePath: string): string[] {
+    return this.graphManager.getAffectedFileDependents(filePath);
   }
 
   /**
