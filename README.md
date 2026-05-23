@@ -329,6 +329,7 @@ codegraph index [path]            # Full index (--force to re-index, --quiet for
 codegraph sync [path]             # Incremental update
 codegraph status [path]           # Show statistics
 codegraph inventory [path]        # Summarize repo artifacts for rewrite planning
+codegraph benchmark [path]        # Measure index and query latency (--json for reports)
 codegraph query <search>          # Search symbols (--kind, --limit, --json)
 codegraph files [path]            # Show file structure (--format, --filter, --max-depth, --json)
 codegraph context <task>          # Build context for AI (--format, --max-nodes)
@@ -369,6 +370,28 @@ that manifest) to keep the CLI safe to run on unfamiliar repositories.
 Python VCS/URL dependency specifiers like `git+https://...#egg=name` are
 recognized via the `#egg=` fragment; bare VCS/URL specs without `#egg=`
 are dropped from the dependency list since no name is recoverable.
+
+### `codegraph benchmark`
+
+Measures cold indexing, warm index reuse, and, when `--query` is provided,
+representative graph queries for any local repository. Use JSON output for trend
+tracking across CodeGraph versions or large repos such as VS Code, PapersFlow,
+or Mastra.
+
+```bash
+codegraph benchmark /path/to/repo --json                       # index/status timings
+codegraph benchmark /path/to/repo --cold --force --cleanup --json
+codegraph benchmark /path/to/repo \
+  --query "search:createWorkflow" \
+  --query "callees:createPerplexityTools" \
+  --query "context:How does workflow execution run?"
+```
+
+Cold mode refuses to remove an existing `.codegraph/` index unless `--force` is
+provided. `--cleanup` removes only a benchmark-owned `.codegraph/` directory; if
+that directory already exists without `codegraph.db`, cleanup refuses to run
+unless `--force` makes the destructive intent explicit. `--reindex` also
+requires `--force` when a previous index exists.
 
 ### `codegraph affected`
 

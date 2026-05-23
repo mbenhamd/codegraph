@@ -23,6 +23,7 @@
     "test:eval": "npm run build && tsc -p tsconfig.eval.json && node --liftoff-only .eval-build/__tests__/evaluation/runner.js",
     "test:eval:structural": "npm run build && tsc -p tsconfig.eval.json && node --liftoff-only .eval-build/__tests__/evaluation/runner.js --fixture structural",
     "test:eval:structural:strict": "npm run build && tsc -p tsconfig.eval.json && node --liftoff-only .eval-build/__tests__/evaluation/runner.js --fixture structural --strict-tracked",
+    "bench:index": "npm run build && node --liftoff-only dist/bin/codegraph.js benchmark",
     "eval": "npm run test:eval --",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
   },
