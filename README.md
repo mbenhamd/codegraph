@@ -358,11 +358,17 @@ files, route/component nodes, exported symbols, test files, and source files are
 reported as stable artifacts that future multi-repo matching can compare across
 old/new repos or upstream/fork rewrites.
 
-`schemaVersion: 1` is the explicit v1 contract. v1 is npm-biased on
-package-level fields (e.g. `InventoryPackage.private` is only set for
-`ecosystem: 'npm'`); equivalent Cargo/pyproject/go.mod toggles will be added
-under an ecosystem-keyed sub-object in v2. Manifest parsing assumes trusted
-local repositories and uses unbounded reads.
+`schemaVersion: 1` is the explicit v1 contract. Ecosystem-specific package
+metadata lives under ecosystem-keyed sub-objects on `InventoryPackage`
+(e.g. `npm.private`); Cargo, pyproject, and go.mod equivalents will land
+under their own sub-objects (`cargo`, `python`, `go`) as the matching
+metadata becomes useful.
+
+Manifest files larger than 1 MB are skipped (returns an empty result for
+that manifest) to keep the CLI safe to run on unfamiliar repositories.
+Python VCS/URL dependency specifiers like `git+https://...#egg=name` are
+recognized via the `#egg=` fragment; bare VCS/URL specs without `#egg=`
+are dropped from the dependency list since no name is recoverable.
 
 ### `codegraph affected`
 

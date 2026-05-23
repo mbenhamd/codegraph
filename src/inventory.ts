@@ -14,15 +14,19 @@ export type InventoryArtifactKind =
   | 'test_file'
   | 'source_file';
 
+export interface InventoryNpmPackage {
+  private?: boolean;
+}
+
 export interface InventoryPackage {
   ecosystem: 'npm' | 'cargo' | 'python' | 'go' | 'requirements';
   path: string;
   name?: string;
   version?: string;
-  private?: boolean;
   scripts: string[];
   dependencies: string[];
   devDependencies: string[];
+  npm?: InventoryNpmPackage;
 }
 
 export interface InventoryArtifact {
@@ -271,15 +275,16 @@ function packageManifestToInventory(projectPath: string, filePath: string): Inve
 
   if (basename === 'package.json') {
     const raw = readJsonObject(filePath);
+    const isPrivate = readBoolean(raw, 'private');
     return {
       ecosystem: 'npm',
       path: relativePath,
       name: readString(raw, 'name'),
       version: readString(raw, 'version'),
-      private: readBoolean(raw, 'private'),
       scripts: Object.keys(readRecord(raw, 'scripts')).sort(),
       dependencies: Object.keys(readRecord(raw, 'dependencies')).sort(),
       devDependencies: Object.keys(readRecord(raw, 'devDependencies')).sort(),
+      ...(isPrivate !== undefined ? { npm: { private: isPrivate } } : {}),
     };
   }
 
@@ -336,9 +341,13 @@ function packageManifestToInventory(projectPath: string, filePath: string): Inve
   return null;
 }
 
+const MAX_MANIFEST_BYTES = 1_000_000;
+
 function readJsonObject(filePath: string): Record<string, unknown> {
+  const text = readBoundedText(filePath);
+  if (!text) return {};
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as unknown;
+    const parsed = JSON.parse(text) as unknown;
     return isRecord(parsed) ? parsed : {};
   } catch {
     return {};
@@ -346,10 +355,24 @@ function readJsonObject(filePath: string): Record<string, unknown> {
 }
 
 function readText(filePath: string): string {
+  return readBoundedText(filePath);
+}
+
+function readBoundedText(filePath: string): string {
+  let fd: number | null = null;
   try {
-    return fs.readFileSync(filePath, 'utf8');
+    fd = fs.openSync(filePath, 'r');
+    const stats = fs.fstatSync(fd);
+    if (stats.size > MAX_MANIFEST_BYTES) return '';
+    const buffer = Buffer.alloc(stats.size);
+    const bytesRead = fs.readSync(fd, buffer, 0, stats.size, 0);
+    return buffer.toString('utf8', 0, bytesRead);
   } catch {
     return '';
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
   }
 }
 
@@ -395,6 +418,11 @@ function readTomlArray(content: string, section: string, key: string): string[] 
   const start = opener.index + opener[0].length;
   const body = readBalancedArrayBody(sectionContent, start);
   if (body === null) return [];
+  // For arrays of inline tables, extractQuotedStrings returns every quoted value
+  // (including version pins), not just dep names. Current callsites only read
+  // pyproject [project].dependencies (array of strings per PEP 621), so this
+  // limitation is dormant. If a future caller reads an array-of-inline-tables
+  // (e.g. Cargo target-specific deps), it needs its own parser.
   return extractQuotedStrings(body).sort();
 }
 
@@ -437,6 +465,16 @@ function readBalancedArrayBody(content: string, start: number): string | null {
 
 function parsePep508Name(spec: string): string {
   const trimmed = spec.trim();
+  if (!trimmed) return '';
+  // PEP 508 direct/URL/VCS forms: 'name @ url', 'git+url#egg=name', or bare URLs.
+  // Direct form has the package name on the left of ' @ '.
+  const directMatch = trimmed.match(/^([A-Za-z0-9_.\-]+)\s*@\s/);
+  if (directMatch) return directMatch[1]!;
+  // VCS/URL with #egg=name fragment.
+  const eggMatch = trimmed.match(/#egg=([A-Za-z0-9_.\-]+)/);
+  if (eggMatch) return eggMatch[1]!;
+  // Bare VCS/URL without #egg= has no recoverable name — skip it.
+  if (/^(git\+|hg\+|svn\+|bzr\+|https?:|file:|ssh:)/.test(trimmed)) return '';
   const semicolon = trimmed.split(';')[0]!;
   const bracket = semicolon.split('[')[0]!;
   return bracket.split(/[<>=~!\s]/)[0]!.trim();
