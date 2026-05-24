@@ -379,7 +379,9 @@ describe('Source file detection (isSourceFile)', () => {
   });
 
   it('rejects unsupported extensions and extensionless files', () => {
-    expect(isSourceFile('src/component.css')).toBe(false);
+    // PF-695: `.css` is now supported (CSS extractor). Use a genuinely
+    // unsupported extension instead.
+    expect(isSourceFile('data.json')).toBe(false);
     expect(isSourceFile('README.md')).toBe(false);
     expect(isSourceFile('Makefile')).toBe(false);
     expect(isSourceFile('.gitignore')).toBe(false);

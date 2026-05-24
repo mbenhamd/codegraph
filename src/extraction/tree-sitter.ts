@@ -24,6 +24,7 @@ import { LiquidExtractor } from './liquid-extractor';
 import { SvelteExtractor } from './svelte-extractor';
 import { DfmExtractor } from './dfm-extractor';
 import { VueExtractor } from './vue-extractor';
+import { extractFromCss } from './css-extractor';
 import {
   getAllFrameworkResolvers,
   getApplicableFrameworks,
@@ -2768,6 +2769,11 @@ export function extractFromSource(
     // Use custom extractor for Liquid
     const extractor = new LiquidExtractor(filePath, source);
     result = extractor.extract();
+  } else if (detectedLanguage === 'css') {
+    // PF-695: dedicated CSS extractor. Doesn't share the
+    // TreeSitterExtractor pipeline (no docstring / import / call
+    // semantics to extract); has its own selector + specificity model.
+    result = extractFromCss(filePath, source);
   } else if (detectedLanguage === 'yaml' || detectedLanguage === 'twig') {
     // No symbol extraction — file is tracked at the file-record level only.
     // Framework extractors (e.g. Drupal routing resolver) run below and may

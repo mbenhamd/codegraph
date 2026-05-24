@@ -38,6 +38,12 @@ export const NODE_KINDS = [
   'export',
   'route',
   'component',
+  // PF-695: CSS selector. Every `.class`, `#id`, or comma-separated
+  // selector entry in a rule set becomes a node of this kind. The
+  // `name` is the selector text, the `signature` carries a preview of
+  // the rule body, and `metadata.specificity` (added by the CSS
+  // extractor) holds the computed integer weight.
+  'selector',
 ] as const;
 
 export type NodeKind = (typeof NODE_KINDS)[number];
@@ -89,6 +95,12 @@ export const LANGUAGES = [
   'luau',
   'yaml',
   'twig',
+  // PF-695: CSS and CSS-like preprocessor source. SCSS / LESS /
+  // Stylus / PostCSS are all routed through the tree-sitter-css
+  // grammar — works for the CSS-compatible subset of each. True
+  // SCSS-specific syntax (nesting, mixins, control flow) parses with
+  // errors but selectors still extract.
+  'css',
   'unknown',
 ] as const;
 

@@ -37,6 +37,7 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   scala: 'tree-sitter-scala.wasm',
   lua: 'tree-sitter-lua.wasm',
   luau: 'tree-sitter-luau.wasm',
+  css: 'tree-sitter-css.wasm',
 };
 
 /**
@@ -92,6 +93,17 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.sc': 'scala',
   '.lua': 'lua',
   '.luau': 'luau',
+  // PF-695: CSS + preprocessor variants. All route through the
+  // tree-sitter-css grammar — works fully for plain CSS and parses
+  // SCSS/LESS/Stylus/PostCSS at the CSS-compatible subset (selectors,
+  // declarations, @-rules) with errors on the language-specific
+  // features (nesting, mixins, etc.). Selectors still extract.
+  '.css': 'css',
+  '.scss': 'css',
+  '.sass': 'css',
+  '.less': 'css',
+  '.styl': 'css',
+  '.pcss': 'css',
 };
 
 /**
@@ -325,6 +337,7 @@ export function getLanguageDisplayName(language: Language): string {
     scala: 'Scala',
     lua: 'Lua',
     luau: 'Luau',
+    css: 'CSS',
     yaml: 'YAML',
     twig: 'Twig',
     unknown: 'Unknown',
