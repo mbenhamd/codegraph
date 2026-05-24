@@ -1,0 +1,5 @@
+{
+  "resolver": "aspnet",
+  "sourcePath": "Controllers/UserController.cs",
+  "description": "ASP.NET `[HttpGet(\"/users\")]` attribute on a controller method — produces one route node referencing the action."
+}

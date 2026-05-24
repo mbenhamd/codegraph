@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:cmd/api/main.go:7:GET:/users",
+      "kind": "route",
+      "name": "GET /users",
+      "qualifiedName": "cmd/api/main.go::route:/users",
+      "filePath": "cmd/api/main.go",
+      "startLine": 7,
+      "endLine": 7,
+      "startColumn": 0,
+      "endColumn": 26,
+      "language": "go"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:cmd/api/main.go:7:GET:/users",
+      "referenceName": "listUsers",
+      "referenceKind": "references",
+      "line": 7,
+      "column": 0,
+      "filePath": "cmd/api/main.go",
+      "language": "go"
+    }
+  ]
+}

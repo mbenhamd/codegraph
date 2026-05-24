@@ -1,0 +1,5 @@
+{
+  "resolver": "vapor",
+  "sourcePath": "Sources/App/routes.swift",
+  "description": "Swift Vapor `app.get(\"users\", use: listUsers)` — produces one route node referencing the handler closure."
+}

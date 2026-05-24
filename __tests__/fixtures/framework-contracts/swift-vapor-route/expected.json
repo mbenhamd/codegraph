@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:Sources/App/routes.swift:4:GET:users",
+      "kind": "route",
+      "name": "GET users",
+      "qualifiedName": "Sources/App/routes.swift::route:users",
+      "filePath": "Sources/App/routes.swift",
+      "startLine": 4,
+      "endLine": 4,
+      "startColumn": 0,
+      "endColumn": 31,
+      "language": "swift"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:Sources/App/routes.swift:4:GET:users",
+      "referenceName": "listUsers",
+      "referenceKind": "references",
+      "line": 4,
+      "column": 0,
+      "filePath": "Sources/App/routes.swift",
+      "language": "swift"
+    }
+  ]
+}

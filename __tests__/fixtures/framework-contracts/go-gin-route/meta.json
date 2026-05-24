@@ -1,0 +1,5 @@
+{
+  "resolver": "go",
+  "sourcePath": "cmd/api/main.go",
+  "description": "Go gin-style `r.GET(\"/users\", listUsers)` — produces one route node referencing the handler function."
+}
