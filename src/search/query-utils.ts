@@ -30,6 +30,33 @@ const SOURCE_ROOT_DIRS = new Set([
   'src', 'source', 'app', 'apps', 'lib', 'packages', 'services',
 ]);
 
+// PF-673: package-role profile layer on top of vendor/generated/build/
+// source-root demotion. Monorepo lanes that are first-party source but
+// still rarely the answer to a broad query — fixtures, test support,
+// docs — get a smaller demotion than vendor/generated. Boost stays only
+// for the explicit `wants*` case (query mentions the role).
+const FIXTURE_DIRS = new Set([
+  'fixtures', '__fixtures__', 'fixture',
+]);
+
+const TEST_SUPPORT_DIRS = new Set([
+  // Jest / Vitest convention: `__mocks__` is unambiguously test-support.
+  // Bare `mocks/` at top level is intentionally NOT included — many apps
+  // use it as runtime mock infrastructure (analytics, payments) that
+  // SHOULD answer broad workflow queries (Codex review note 2026-05-24).
+  '__mocks__', 'stubs', '__stubs__',
+  'test-utils', 'test_utils', 'testing-library', 'test-support',
+  'test-helpers', 'test_helpers',
+]);
+
+const DOCS_DIRS = new Set([
+  // `examples/` intentionally NOT included — real apps put runnable
+  // first-party code under `examples/foo-app/src/...` and demoting
+  // them on a broad workflow query buries legitimate code (Codex
+  // review note 2026-05-24).
+  'docs', 'doc', 'documentation',
+]);
+
 /**
  * Common stop words to filter from search queries.
  * Includes generic English + code-specific noise words.
@@ -279,6 +306,49 @@ export function getPathRankingSignals(filePath: string, query: string): PathRank
     } else {
       scoreAdjustment -= 12;
       reasons.push('demoted build-output path');
+    }
+  }
+
+  // PF-673: package-role refinements on top of the PF-608 layer. Apply
+  // ONLY when no vendor/generated/build dir has already triggered a
+  // demotion — those are stronger signals and shouldn't be compounded.
+  if (!hasVendoredDir && !hasGeneratedDir && !hasBuildOutputDir) {
+    const hasFixtureDir = segments.some((seg) => FIXTURE_DIRS.has(seg));
+    const hasTestSupportDir = segments.some((seg) => TEST_SUPPORT_DIRS.has(seg));
+    const hasDocsDir = segments.some((seg) => DOCS_DIRS.has(seg));
+
+    const wantsFixture = queryMentionsAny(queryLower, queryTerms, FIXTURE_DIRS);
+    const wantsTestSupport = queryMentionsAny(queryLower, queryTerms, TEST_SUPPORT_DIRS);
+    const wantsDocs = queryMentionsAny(queryLower, queryTerms, DOCS_DIRS);
+
+    if (hasFixtureDir) {
+      if (wantsFixture) {
+        scoreAdjustment += 4;
+        reasons.push('explicit fixture path query');
+      } else {
+        scoreAdjustment -= 8;
+        reasons.push('demoted fixture path');
+      }
+    }
+
+    if (hasTestSupportDir) {
+      if (wantsTestSupport) {
+        scoreAdjustment += 4;
+        reasons.push('explicit test-support path query');
+      } else {
+        scoreAdjustment -= 8;
+        reasons.push('demoted test-support path');
+      }
+    }
+
+    if (hasDocsDir) {
+      if (wantsDocs) {
+        scoreAdjustment += 4;
+        reasons.push('explicit docs path query');
+      } else {
+        scoreAdjustment -= 6;
+        reasons.push('demoted docs path');
+      }
     }
   }
 

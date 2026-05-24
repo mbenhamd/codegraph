@@ -67,4 +67,79 @@ describe('path ranking', () => {
     expect(appScore).toBeGreaterThan(thirdPartyScore);
     expect(appScore).toBeGreaterThan(vendorScore);
   });
+
+  // PF-673: package-role refinements on top of PF-608.
+  describe('package-role profiles (PF-673)', () => {
+    it('demotes fixtures, test-support, and docs lanes by default', () => {
+      expect(
+        getPathRankingSignals('src/__fixtures__/payment.ts', 'payment service').reasons,
+      ).toContain('demoted fixture path');
+      expect(
+        getPathRankingSignals('packages/api/test-utils/payment.ts', 'payment service').reasons,
+      ).toContain('demoted test-support path');
+      expect(
+        getPathRankingSignals('docs/architecture/payment.md', 'payment service').reasons,
+      ).toContain('demoted docs path');
+    });
+
+    it('does NOT demote `examples/` — runnable first-party apps live there', () => {
+      // `examples/payment-app/src/handler.ts` is real code in many
+      // monorepo layouts; demoting it for a broad query like
+      // 'payment service' buries legitimate user code.
+      const signals = getPathRankingSignals(
+        'examples/payment-app/src/handler.ts',
+        'payment service',
+      );
+      expect(signals.reasons).not.toContain('demoted docs path');
+    });
+
+    it('does NOT demote top-level `mocks/` — production mock infra lives there', () => {
+      // Plain `mocks/` (vs `__mocks__/`) is often app-side mock
+      // infrastructure (analytics, payments) that should answer
+      // broad workflow queries; only `__mocks__` is treated as
+      // Jest/Vitest test-support.
+      const signals = getPathRankingSignals(
+        'mocks/analytics.ts',
+        'analytics tracking',
+      );
+      expect(signals.reasons).not.toContain('demoted test-support path');
+    });
+
+    it('keeps fixture / test-support / docs paths reachable when the query explicitly mentions them', () => {
+      const fixtureSignals = getPathRankingSignals(
+        'src/__fixtures__/payment.ts',
+        'fixtures payment',
+      );
+      expect(fixtureSignals.scoreAdjustment).toBeGreaterThanOrEqual(0);
+      expect(fixtureSignals.reasons).toContain('explicit fixture path query');
+
+      const testSupportSignals = getPathRankingSignals(
+        'packages/api/test-utils/payment.ts',
+        'test-utils payment',
+      );
+      expect(testSupportSignals.reasons).toContain('explicit test-support path query');
+
+      const docsSignals = getPathRankingSignals('docs/architecture/payment.md', 'docs payment');
+      expect(docsSignals.reasons).toContain('explicit docs path query');
+    });
+
+    it('does NOT apply role demotion on top of vendor/generated/build demotion (no double-count)', () => {
+      const signals = getPathRankingSignals(
+        'vendor/sdk/__fixtures__/payment.ts',
+        'payment',
+      );
+      expect(signals.reasons).toContain('demoted vendor/third_party path');
+      expect(signals.reasons).not.toContain('demoted fixture path');
+    });
+
+    it('ranks app source above same-named file in fixtures lane', () => {
+      const query = 'PaymentService charge';
+      const appScore = scorePathRelevance('src/app/payment-service.ts', query);
+      const fixtureScore = scorePathRelevance(
+        'src/__fixtures__/payment-service.ts',
+        query,
+      );
+      expect(appScore).toBeGreaterThan(fixtureScore);
+    });
+  });
 });
