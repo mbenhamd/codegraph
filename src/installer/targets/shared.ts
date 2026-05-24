@@ -68,10 +68,65 @@ export function readJsonFile(filePath: string): Record<string, any> {
 }
 
 /**
+ * PF-627: extension used for the proactive pre-install backup. Kept
+ * deliberately distinct from the `.backup` suffix `readJsonFile`
+ * writes on JSON parse failure — that one is a defensive copy of a
+ * file we're about to overwrite with `{}`, while this one captures
+ * the user's pristine pre-install state so a future
+ * `restore-from-backup` uninstall path (or a manual recovery) can
+ * roll back what codegraph installed.
+ */
+export const PREINSTALL_BACKUP_SUFFIX = '.codegraph.bak';
+
+/**
+ * Snapshot `filePath` to `<filePath>.codegraph.bak` BEFORE the first
+ * install touches it. Idempotent: the backup is only created when
+ * the target file exists AND a backup doesn't already exist — so a
+ * repeat install (codegraph upgrade self-heal) NEVER overwrites the
+ * pristine snapshot with the post-install state.
+ *
+ * Returns the backup path on creation, `null` when no backup was
+ * needed (file missing) or attempted (backup already exists). Never
+ * throws on I/O failure: a failed backup must not block the install
+ * itself, which is what users came for. Errors are logged so a real
+ * filesystem problem isn't silently swallowed.
+ */
+export function backupBeforeInstall(
+  filePath: string,
+): { backupPath: string; created: boolean } | null {
+  if (!fs.existsSync(filePath)) return null;
+  const backupPath = filePath + PREINSTALL_BACKUP_SUFFIX;
+  if (fs.existsSync(backupPath)) {
+    // Pristine snapshot already captured on the first install. Don't
+    // re-snapshot — the current file state already includes our
+    // installed changes.
+    return { backupPath, created: false };
+  }
+  try {
+    fs.copyFileSync(filePath, backupPath);
+    return { backupPath, created: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `  Warning: Could not create pre-install backup ${path.basename(backupPath)}: ${msg}`,
+    );
+    return null;
+  }
+}
+
+/**
  * Write a file atomically: write to `<path>.tmp.<pid>`, then rename.
  *
  * Prevents corruption if the process crashes mid-write. The temp
  * file is cleaned up on rename failure.
+ *
+ * NB: this primitive does NOT take a pre-install backup. Both install
+ * AND uninstall code paths call it; auto-backup here would snapshot
+ * codegraph-mutated content during uninstall and poison the future
+ * restore contract. Install-only callers should call
+ * `backupBeforeInstall(filePath)` first, or use
+ * `writeJsonFileForInstall` / `replaceOrAppendMarkedSection`, which
+ * back up explicitly.
  */
 export function atomicWriteFileSync(filePath: string, content: string): void {
   const dir = path.dirname(filePath);
@@ -91,8 +146,31 @@ export function atomicWriteFileSync(filePath: string, content: string): void {
 /**
  * Atomic JSON write. Trailing newline matches the convention every
  * existing target had — preserves diff-friendly file shape.
+ *
+ * Used by BOTH install and uninstall code paths (uninstall writes
+ * the cleaned config back). Callers on the install side should use
+ * `writeJsonFileForInstall` instead so the user's pristine
+ * pre-install state is snapshotted to `.codegraph.bak` before the
+ * first overwrite.
  */
 export function writeJsonFile(filePath: string, data: Record<string, any>): void {
+  atomicWriteFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
+}
+
+/**
+ * PF-627: install-only JSON writer. Snapshots `filePath` to
+ * `<filePath>.codegraph.bak` (idempotent — see
+ * `backupBeforeInstall`), then performs the same atomic JSON write
+ * as `writeJsonFile`. Use this from install paths so a user's
+ * pristine pre-install config is recoverable; use `writeJsonFile`
+ * (no backup) from uninstall paths where the on-disk content is
+ * already codegraph-mutated and backing it up would poison restore.
+ */
+export function writeJsonFileForInstall(
+  filePath: string,
+  data: Record<string, any>,
+): void {
+  backupBeforeInstall(filePath);
   atomicWriteFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
 }
 
@@ -154,6 +232,9 @@ export function replaceOrAppendMarkedSection(
     if (existingBlock === body) {
       return 'unchanged';
     }
+    // PF-627: install-only function — backup the pristine pre-install
+    // state before the first overwrite (idempotent on re-install).
+    backupBeforeInstall(filePath);
     const before = content.substring(0, startIdx);
     const after = content.substring(endIdx + endMarker.length);
     atomicWriteFileSync(filePath, before + body + after);
@@ -162,6 +243,8 @@ export function replaceOrAppendMarkedSection(
 
   // No markers — append. Preserve existing content with a separating
   // blank line.
+  // PF-627: install-only path — same backup rationale as above.
+  backupBeforeInstall(filePath);
   const trimmed = content.trimEnd();
   const sep = trimmed.length > 0 ? '\n\n' : '';
   atomicWriteFileSync(filePath, trimmed + sep + body + '\n');
