@@ -1,0 +1,5 @@
+{
+  "resolver": "django",
+  "sourcePath": "users/urls.py",
+  "description": "Django path() with a class-based view's .as_view() — produces one route node and one references edge to the view class."
+}

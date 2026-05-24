@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:api/items.py:5:GET:/items/{item_id}",
+      "kind": "route",
+      "name": "GET /items/{item_id}",
+      "qualifiedName": "api/items.py::GET:/items/{item_id}",
+      "filePath": "api/items.py",
+      "startLine": 5,
+      "endLine": 5,
+      "startColumn": 0,
+      "endColumn": 27,
+      "language": "python"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:api/items.py:5:GET:/items/{item_id}",
+      "referenceName": "read_item",
+      "referenceKind": "references",
+      "line": 5,
+      "column": 0,
+      "filePath": "api/items.py",
+      "language": "python"
+    }
+  ]
+}

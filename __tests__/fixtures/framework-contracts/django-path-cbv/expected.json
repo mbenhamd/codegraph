@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:users/urls.py:5:users/",
+      "kind": "route",
+      "name": "users/",
+      "qualifiedName": "users/urls.py::route:users/",
+      "filePath": "users/urls.py",
+      "startLine": 5,
+      "endLine": 5,
+      "startColumn": 0,
+      "endColumn": 37,
+      "language": "python"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:users/urls.py:5:users/",
+      "referenceName": "UserListView",
+      "referenceKind": "references",
+      "line": 5,
+      "column": 0,
+      "filePath": "users/urls.py",
+      "language": "python"
+    }
+  ]
+}
