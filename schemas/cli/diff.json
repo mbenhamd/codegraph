@@ -1,0 +1,185 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/diff.json",
+  "title": "CodeGraph CLI `diff --json` output",
+  "description": "Structural delta between two CodeGraph DBs. Covers file, node, and edge granularity, plus fingerprint coverage so consumers can detect synthesized-extractor gaps (Liquid/Vue/Svelte etc. emit NULL fingerprints).",
+  "allOf": [
+    { "$ref": "envelope.json" },
+    {
+      "type": "object",
+      "required": [
+        "tool",
+        "addedFiles",
+        "removedFiles",
+        "changedFiles",
+        "addedNodes",
+        "removedNodes",
+        "changedNodes",
+        "addedEdges",
+        "removedEdges",
+        "changedEdges",
+        "summary",
+        "fingerprintCoverage"
+      ],
+      "properties": {
+        "tool": { "const": "diff" },
+        "addedFiles": { "type": "array", "items": { "$ref": "#/definitions/fileSnapshot" } },
+        "removedFiles": { "type": "array", "items": { "$ref": "#/definitions/fileSnapshot" } },
+        "changedFiles": { "type": "array", "items": { "$ref": "#/definitions/fileChange" } },
+        "addedNodes": { "type": "array", "items": { "$ref": "#/definitions/nodeSnapshot" } },
+        "removedNodes": { "type": "array", "items": { "$ref": "#/definitions/nodeSnapshot" } },
+        "changedNodes": { "type": "array", "items": { "$ref": "#/definitions/nodeChange" } },
+        "addedEdges": { "type": "array", "items": { "$ref": "#/definitions/edgeIdentity" } },
+        "removedEdges": { "type": "array", "items": { "$ref": "#/definitions/edgeIdentity" } },
+        "changedEdges": { "type": "array", "items": { "$ref": "#/definitions/edgeChange" } },
+        "summary": {
+          "type": "object",
+          "required": [
+            "addedFiles", "removedFiles", "changedFiles",
+            "addedNodes", "removedNodes", "changedNodes",
+            "addedEdges", "removedEdges", "changedEdges"
+          ],
+          "properties": {
+            "addedFiles": { "type": "integer", "minimum": 0 },
+            "removedFiles": { "type": "integer", "minimum": 0 },
+            "changedFiles": { "type": "integer", "minimum": 0 },
+            "addedNodes": { "type": "integer", "minimum": 0 },
+            "removedNodes": { "type": "integer", "minimum": 0 },
+            "changedNodes": { "type": "integer", "minimum": 0 },
+            "addedEdges": { "type": "integer", "minimum": 0 },
+            "removedEdges": { "type": "integer", "minimum": 0 },
+            "changedEdges": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "fingerprintCoverage": {
+          "description": "Counts of nodes with non-null astHash per DB. When totalNodes > nodesWithAstHash, fingerprint-based change detection is blind to those rows — typically synthesized-extractor file types (Liquid/Vue/Svelte/YAML).",
+          "type": "object",
+          "required": ["old", "new"],
+          "properties": {
+            "old": { "$ref": "#/definitions/fingerprintCount" },
+            "new": { "$ref": "#/definitions/fingerprintCount" }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "fileSnapshot": {
+      "type": "object",
+      "required": ["path", "language"],
+      "properties": {
+        "path": { "type": "string" },
+        "language": { "type": "string" },
+        "contentHash": { "type": "string" },
+        "size": { "type": "integer", "minimum": 0 },
+        "nodeCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fileChange": {
+      "type": "object",
+      "required": ["path", "language", "changedFields", "old", "new"],
+      "properties": {
+        "path": { "type": "string" },
+        "language": { "type": "string" },
+        "changedFields": { "type": "array", "items": { "type": "string" } },
+        "old": {
+          "type": "object",
+          "required": ["contentHash", "size", "nodeCount"],
+          "properties": {
+            "contentHash": { "type": "string" },
+            "size": { "type": "integer", "minimum": 0 },
+            "nodeCount": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "new": {
+          "type": "object",
+          "required": ["contentHash", "size", "nodeCount"],
+          "properties": {
+            "contentHash": { "type": "string" },
+            "size": { "type": "integer", "minimum": 0 },
+            "nodeCount": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "nodeSnapshot": {
+      "type": "object",
+      "required": ["qualifiedName", "filePath", "startLine", "endLine", "language"],
+      "properties": {
+        "qualifiedName": { "type": "string" },
+        "filePath": { "type": "string" },
+        "startLine": { "type": "integer", "minimum": 0 },
+        "endLine": { "type": "integer", "minimum": 0 },
+        "language": { "type": "string" },
+        "signature": { "type": ["string", "null"] },
+        "astHash": { "type": ["string", "null"] },
+        "astShapeHash": { "type": ["string", "null"] },
+        "sigHash": { "type": ["string", "null"] },
+        "callPatternHash": { "type": ["string", "null"] }
+      }
+    },
+    "nodeChange": {
+      "type": "object",
+      "required": ["id", "name", "kind", "filePath", "changedFields", "old", "new"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "kind": { "type": "string" },
+        "filePath": { "type": "string" },
+        "changedFields": { "type": "array", "items": { "type": "string" } },
+        "old": { "$ref": "#/definitions/nodeSnapshot" },
+        "new": { "$ref": "#/definitions/nodeSnapshot" }
+      }
+    },
+    "edgeIdentity": {
+      "type": "object",
+      "required": ["source", "target", "kind", "line", "col"],
+      "properties": {
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "kind": { "type": "string" },
+        "line": { "type": ["integer", "null"] },
+        "col": { "type": ["integer", "null"] }
+      }
+    },
+    "edgeChange": {
+      "type": "object",
+      "required": ["source", "target", "kind", "line", "col", "changedFields", "old", "new"],
+      "properties": {
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "kind": { "type": "string" },
+        "line": { "type": ["integer", "null"] },
+        "col": { "type": ["integer", "null"] },
+        "changedFields": { "type": "array", "items": { "type": "string" } },
+        "old": {
+          "type": "object",
+          "required": ["metadata", "provenance"],
+          "properties": {
+            "metadata": { "type": ["object", "null"] },
+            "provenance": { "type": ["string", "null"] }
+          }
+        },
+        "new": {
+          "type": "object",
+          "required": ["metadata", "provenance"],
+          "properties": {
+            "metadata": { "type": ["object", "null"] },
+            "provenance": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "fingerprintCount": {
+      "type": "object",
+      "required": ["totalNodes", "nodesWithAstHash"],
+      "properties": {
+        "totalNodes": { "type": "integer", "minimum": 0 },
+        "nodesWithAstHash": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

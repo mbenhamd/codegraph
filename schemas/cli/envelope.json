@@ -13,7 +13,7 @@
     },
     "tool": {
       "type": "string",
-      "description": "Name of the CLI subcommand that produced this output (status, search, callers, callees, impact, affected, inventory, files).",
+      "description": "Name of the CLI subcommand that produced this output. PR #38 added the original 8 enveloped subcommands; PRs #39-#41 add diff/duplicates/explain on top of the PF-690 fingerprint columns.",
       "enum": [
         "status",
         "search",
@@ -22,7 +22,10 @@
         "impact",
         "affected",
         "inventory",
-        "files"
+        "files",
+        "diff",
+        "duplicates",
+        "explain"
       ]
     }
   },
