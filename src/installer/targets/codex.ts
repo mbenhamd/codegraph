@@ -26,6 +26,7 @@ import {
 } from './types';
 import {
   atomicWriteFileSync,
+  backupBeforeInstall,
   getMcpServerConfig,
   removeMarkedSection,
   replaceOrAppendMarkedSection,
@@ -156,6 +157,8 @@ function writeMcpEntry(): WriteResult['files'][number] {
   if (action === 'unchanged') {
     return { path: file, action: 'unchanged' };
   }
+  // PF-627: install-path write — snapshot pristine state before edit.
+  backupBeforeInstall(file);
   atomicWriteFileSync(file, nextContent);
   return { path: file, action: created ? 'created' : 'updated' };
 }

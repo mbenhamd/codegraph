@@ -48,6 +48,7 @@ import {
   readJsonFile,
   replaceOrAppendMarkedSection,
   writeJsonFile,
+  writeJsonFileForInstall,
 } from './shared';
 import {
   CODEGRAPH_SECTION_END,
@@ -193,7 +194,7 @@ function writeMcpEntry(loc: Location): WriteResult['files'][number] {
   const action: 'created' | 'updated' = before ? 'updated' : (fs.existsSync(file) ? 'updated' : 'created');
   if (!existing.mcpServers) existing.mcpServers = {};
   existing.mcpServers.codegraph = after;
-  writeJsonFile(file, existing);
+  writeJsonFileForInstall(file, existing);
   return { path: file, action };
 }
 

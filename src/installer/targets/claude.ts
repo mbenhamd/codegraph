@@ -36,6 +36,8 @@ import {
   removeMarkedSection,
   replaceOrAppendMarkedSection,
   writeJsonFile,
+  writeJsonFileForInstall,
+  backupBeforeInstall,
 } from './shared';
 import {
   CODEGRAPH_SECTION_END,
@@ -231,7 +233,7 @@ export function writeMcpEntry(loc: Location): WriteResult['files'][number] {
   const action: 'created' | 'updated' = before ? 'updated' : (fs.existsSync(file) ? 'updated' : 'created');
   if (!existing.mcpServers) existing.mcpServers = {};
   existing.mcpServers.codegraph = after;
-  writeJsonFile(file, existing);
+  writeJsonFileForInstall(file, existing);
   return { path: file, action };
 }
 
@@ -242,6 +244,17 @@ export function writeMcpEntry(loc: Location): WriteResult['files'][number] {
  * MCP servers and any unrelated keys are preserved, and the file is
  * deleted only when removal leaves it completely empty. Returns the
  * file action for reporting, or `null` when there's nothing to migrate.
+ */
+/**
+ * PF-627 exception: this helper is called from BOTH `install()` (to
+ * migrate away a pre-#207 local install) and `uninstall()` (to
+ * fully reverse a legacy install). In both paths the helper only
+ * runs when `config.mcpServers.codegraph` is present — i.e. the
+ * file ALREADY contains codegraph's prior footprint. Backing up
+ * such a file would snapshot codegraph-mutated content, not the
+ * user's pristine pre-install state (which was lost when the
+ * legacy install ran), so the write here intentionally uses
+ * `writeJsonFile` (no backup).
  */
 function cleanupLegacyLocalMcp(): WriteResult['files'][number] | null {
   const file = legacyLocalMcpPath();
@@ -292,6 +305,13 @@ function isLegacyCodegraphHookCommand(command: unknown): boolean {
  *
  * Exported so it can be unit-tested directly and reused by both
  * `install` (an upgrade self-heals) and `uninstall`.
+ *
+ * PF-627 exception: same rationale as `cleanupLegacyLocalMcp` —
+ * this only writes when codegraph's legacy hook entries were
+ * present in `settings.json`, so the file already contains
+ * codegraph-mutated content. Backing up here would snapshot
+ * codegraph state, not user-pristine state, so the write uses
+ * `writeJsonFile` (no backup) intentionally.
  */
 export function cleanupLegacyHooks(loc: Location): WriteResult['files'][number] {
   const file = settingsJsonPath(loc);
@@ -355,7 +375,7 @@ export function writePermissionsEntry(loc: Location): WriteResult['files'][numbe
   if (jsonDeepEqual(before, settings.permissions.allow) && !created) {
     return { path: file, action: 'unchanged' };
   }
-  writeJsonFile(file, settings);
+  writeJsonFileForInstall(file, settings);
   return { path: file, action: created ? 'created' : 'updated' };
 }
 
@@ -383,6 +403,8 @@ export function writeInstructionsEntry(loc: Location): WriteResult['files'][numb
           content.substring(0, sectionStart) +
           '\n' + INSTRUCTIONS_TEMPLATE +
           content.substring(sectionEnd);
+        // PF-627: legacy-section migration is an install-path write.
+        backupBeforeInstall(file);
         atomicWriteFileSync(file, merged);
         return { path: file, action: 'updated' };
       }

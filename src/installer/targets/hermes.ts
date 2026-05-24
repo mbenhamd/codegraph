@@ -24,7 +24,7 @@ import {
   Location,
   WriteResult,
 } from './types';
-import { atomicWriteFileSync } from './shared';
+import { atomicWriteFileSync, backupBeforeInstall } from './shared';
 
 type LineRange = { start: number; end: number };
 
@@ -130,6 +130,8 @@ function writeHermesConfig(): WriteResult['files'][number] {
   if (after === before) {
     return { path: file, action: 'unchanged' };
   }
+  // PF-627: install-path write — snapshot pristine state before edit.
+  backupBeforeInstall(file);
   atomicWriteFileSync(file, ensureTrailingNewline(after));
   return { path: file, action: existed ? 'updated' : 'created' };
 }

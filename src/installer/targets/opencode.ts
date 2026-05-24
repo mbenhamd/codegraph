@@ -39,6 +39,7 @@ import {
 } from './types';
 import {
   atomicWriteFileSync,
+  backupBeforeInstall,
   jsonDeepEqual,
   removeMarkedSection,
   replaceOrAppendMarkedSection,
@@ -218,6 +219,8 @@ function writeMcpEntry(loc: Location): WriteResult['files'][number] {
     formattingOptions: FORMATTING,
   });
   const updated = applyEdits(text, edits);
+  // PF-627: install-path write — snapshot pristine state before edit.
+  backupBeforeInstall(file);
   atomicWriteFileSync(file, updated);
 
   return { path: file, action: existed ? 'updated' : 'created' };
