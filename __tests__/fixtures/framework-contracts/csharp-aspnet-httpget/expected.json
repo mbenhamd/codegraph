@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:Controllers/UserController.cs:7:GET:/users",
+      "kind": "route",
+      "name": "GET /users",
+      "qualifiedName": "Controllers/UserController.cs::route:/users",
+      "filePath": "Controllers/UserController.cs",
+      "startLine": 7,
+      "endLine": 7,
+      "startColumn": 0,
+      "endColumn": 19,
+      "language": "csharp"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:Controllers/UserController.cs:7:GET:/users",
+      "referenceName": "ListUsers",
+      "referenceKind": "references",
+      "line": 7,
+      "column": 0,
+      "filePath": "Controllers/UserController.cs",
+      "language": "csharp"
+    }
+  ]
+}

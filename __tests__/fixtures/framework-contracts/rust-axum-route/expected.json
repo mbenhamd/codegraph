@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:src/main.rs:4:GET:/users",
+      "kind": "route",
+      "name": "GET /users",
+      "qualifiedName": "src/main.rs::route:/users",
+      "filePath": "src/main.rs",
+      "startLine": 4,
+      "endLine": 4,
+      "startColumn": 0,
+      "endColumn": 31,
+      "language": "rust"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:src/main.rs:4:GET:/users",
+      "referenceName": "list_users",
+      "referenceKind": "references",
+      "line": 4,
+      "column": 0,
+      "filePath": "src/main.rs",
+      "language": "rust"
+    }
+  ]
+}

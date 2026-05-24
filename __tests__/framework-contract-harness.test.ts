@@ -46,6 +46,10 @@ import { springResolver } from '../src/resolution/frameworks/java';
 import { laravelResolver } from '../src/resolution/frameworks/laravel';
 import { railsResolver } from '../src/resolution/frameworks/ruby';
 import { nestjsResolver } from '../src/resolution/frameworks/nestjs';
+import { goResolver } from '../src/resolution/frameworks/go';
+import { rustResolver } from '../src/resolution/frameworks/rust';
+import { aspnetResolver } from '../src/resolution/frameworks/csharp';
+import { vaporResolver } from '../src/resolution/frameworks/swift';
 
 const RESOLVERS: Record<string, FrameworkResolver> = {
   django: djangoResolver,
@@ -56,6 +60,10 @@ const RESOLVERS: Record<string, FrameworkResolver> = {
   laravel: laravelResolver,
   rails: railsResolver,
   nestjs: nestjsResolver,
+  go: goResolver,
+  rust: rustResolver,
+  aspnet: aspnetResolver,
+  vapor: vaporResolver,
 };
 
 interface FixtureMeta {

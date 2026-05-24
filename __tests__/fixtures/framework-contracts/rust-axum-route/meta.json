@@ -1,0 +1,5 @@
+{
+  "resolver": "rust",
+  "sourcePath": "src/main.rs",
+  "description": "Rust axum `Router::new().route(\"/users\", get(list_users))` — produces one route node referencing the handler function."
+}
