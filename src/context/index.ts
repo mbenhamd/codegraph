@@ -154,6 +154,7 @@ const DEFAULT_BUILD_OPTIONS: Required<BuildContextOptions> = {
   searchLimit: 3,         // Reduced from 5 - fewer entry points
   traversalDepth: 1,      // Reduced from 2 - shallower graph expansion
   minScore: 0.3,
+  diagnostics: false,     // PF-618: opt-in ranking diagnostics
 };
 
 /**
@@ -252,7 +253,14 @@ export class ContextBuilder {
       codeBlockCount: codeBlocks.length,
       totalCodeSize: codeBlocks.reduce((sum, block) => sum + block.content.length, 0),
     };
-    const rankingDiagnostics = this.getRankingDiagnostics(query, relatedFiles);
+    // PF-618: ranking diagnostics are opt-in. When `diagnostics: true`
+    // is passed, populate the field so the formatter renders the
+    // explanation block. When false (default), skip the work entirely
+    // so normal MCP/CLI responses stay compact even when path-level
+    // signals would have fired.
+    const rankingDiagnostics = opts.diagnostics
+      ? this.getRankingDiagnostics(query, relatedFiles)
+      : [];
 
     const context: TaskContext = {
       query,

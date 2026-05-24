@@ -283,12 +283,13 @@ export class PaymentService {
       expect(Array.isArray(parsed.nodes)).toBe(true);
     });
 
-    it('should include path ranking diagnostics in JSON context', async () => {
+    it('should include path ranking diagnostics in JSON context when opted in (PF-618)', async () => {
       const result = await cg.buildContext('PaymentService processPayment', {
         format: 'json',
         searchLimit: 8,
         traversalDepth: 1,
         maxNodes: 20,
+        diagnostics: true,
       });
       const parsed = JSON.parse(result as string);
 
@@ -300,6 +301,20 @@ export class PaymentService {
           }),
         ])
       );
+    });
+
+    it('omits ranking diagnostics from JSON context by default (PF-618)', async () => {
+      const result = await cg.buildContext('PaymentService processPayment', {
+        format: 'json',
+        searchLimit: 8,
+        traversalDepth: 1,
+        maxNodes: 20,
+      });
+      const parsed = JSON.parse(result as string);
+      // Default behavior: the rankingDiagnostics field is absent — not
+      // an empty array — so the normal response stays compact and the
+      // shape contract is unambiguous for programmatic consumers.
+      expect(parsed).not.toHaveProperty('rankingDiagnostics');
     });
 
     it('should accept object input with title and description', async () => {
