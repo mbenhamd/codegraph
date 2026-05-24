@@ -495,6 +495,18 @@ export const tools: ToolDefinition[] = [
           description: 'Maximum number of files to include source code from (default: 12)',
           default: 12,
         },
+        diagnostics: {
+          type: 'boolean',
+          description:
+            'PF-618 follow-up: when true, append a `Ranking Diagnostics` block per top-ranked file ' +
+            'listing its structural-score factors (entry-point count, directly-connected-to-entry ' +
+            'count, other-node count) plus query-match and low-value-path flags. The block uses ' +
+            'classification flags, not outcome claims — `low-value-path` flags a path the sort ' +
+            'WOULD demote behind higher-value files, not proof that a specific file was demoted ' +
+            'in this run. Default off so normal responses stay compact. Debug-oriented format; ' +
+            'subject to change.',
+          default: false,
+        },
         projectPath: projectPathProperty,
         path: pathFilterProperty,
         excludePath: excludePathFilterProperty,
@@ -1139,8 +1151,20 @@ export class ToolHandler {
       return this.textResult(`No relevant code found for "${query}"${scopeNote}`);
     }
 
+    const diagnosticsEnabled = args.diagnostics === true;
+
     // Step 2: Group nodes by file, score by relevance
-    const fileGroups = new Map<string, { nodes: Node[]; score: number }>();
+    type FileGroup = {
+      nodes: Node[];
+      score: number;
+      // PF-618b: track per-file factors so opt-in diagnostics can
+      // explain ranking. Populated regardless so the score above
+      // stays consistent; rendered only when diagnosticsEnabled.
+      entryCount: number;
+      connectedCount: number;
+      otherCount: number;
+    };
+    const fileGroups = new Map<string, FileGroup>();
     const entryNodeIds = new Set(subgraph.roots);
 
     // Build a set of nodes directly connected to entry points (depth 1)
@@ -1154,15 +1178,24 @@ export class ToolHandler {
       // Skip import/export nodes — they add noise without information
       if (node.kind === 'import' || node.kind === 'export') continue;
 
-      const group = fileGroups.get(node.filePath) || { nodes: [], score: 0 };
+      const group = fileGroups.get(node.filePath) || {
+        nodes: [],
+        score: 0,
+        entryCount: 0,
+        connectedCount: 0,
+        otherCount: 0,
+      };
       group.nodes.push(node);
       // Score: entry point nodes worth 10, directly connected worth 3, others worth 1
       if (entryNodeIds.has(node.id)) {
         group.score += 10;
+        group.entryCount += 1;
       } else if (connectedToEntry.has(node.id)) {
         group.score += 3;
+        group.connectedCount += 1;
       } else {
         group.score += 1;
+        group.otherCount += 1;
       }
       fileGroups.set(node.filePath, group);
     }
@@ -1209,6 +1242,46 @@ export class ToolHandler {
       `Found ${subgraph.nodes.size} symbols across ${fileGroups.size} files.`,
       '',
     ];
+
+    // PF-618 follow-up: opt-in ranking diagnostics. Explain why each
+    // top file ranked where it did using the factors collected during
+    // grouping + sort. Place BEFORE the relationship map and source
+    // code sections so truncateOutput tail-trim doesn't strip the
+    // signal (matches PF-606b/PF-618 placement convention).
+    if (diagnosticsEnabled && sortedFiles.length > 0) {
+      lines.push('### Ranking Diagnostics');
+      lines.push('');
+      const isLowValuePath = (p: string) =>
+        /\/(tests?|__tests?__|spec)\//i.test(p) ||
+        /\bicons?\b/i.test(p) ||
+        /\bi18n\b/i.test(p);
+      const hasQueryMatch = (filePath: string, nodes: Node[]) => {
+        const fp = filePath.toLowerCase();
+        if (queryTerms.some((t) => fp.includes(t))) return true;
+        return nodes.some((n) => queryTerms.some((t) => n.name.toLowerCase().includes(t)));
+      };
+      // Note on the numbers below: `structural score` is the
+      // per-file accumulator (10 per entry-point node, 3 per
+      // connected, 1 per other). The actual sort additionally flips
+      // on `query-match` and `low-value-path` BEFORE comparing the
+      // structural score, so a lower-score file can outrank a
+      // higher-score one when the former matches the query and the
+      // latter is in a low-value path. The factor list explains
+      // that, but the displayed number only reflects the structural
+      // component (Codex round-1 finding — flagged here rather than
+      // computing a synthetic composite that would couple the
+      // display to the sort impl).
+      for (const [filePath, group] of sortedFiles.slice(0, 8)) {
+        const factors: string[] = [];
+        if (group.entryCount > 0) factors.push(`${group.entryCount} entry`);
+        if (group.connectedCount > 0) factors.push(`${group.connectedCount} connected`);
+        if (group.otherCount > 0) factors.push(`${group.otherCount} other`);
+        if (hasQueryMatch(filePath.toLowerCase(), group.nodes)) factors.push('query-match');
+        if (isLowValuePath(filePath.toLowerCase())) factors.push('low-value-path');
+        lines.push(`- ${filePath} — structural score ${group.score} (${factors.join(', ')})`);
+      }
+      lines.push('');
+    }
 
     // Relationship map — show how symbols connect
     const significantEdges = subgraph.edges.filter(e =>
