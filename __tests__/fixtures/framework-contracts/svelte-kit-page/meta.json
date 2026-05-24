@@ -1,0 +1,5 @@
+{
+  "resolver": "svelte",
+  "sourcePath": "src/routes/blog/+page.svelte",
+  "description": "SvelteKit `+page.svelte` route file under `src/routes/blog/` produces a route node for `/blog`. The Svelte extractor is filename-driven; content is ignored."
+}

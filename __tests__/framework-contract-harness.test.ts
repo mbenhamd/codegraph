@@ -50,6 +50,9 @@ import { goResolver } from '../src/resolution/frameworks/go';
 import { rustResolver } from '../src/resolution/frameworks/rust';
 import { aspnetResolver } from '../src/resolution/frameworks/csharp';
 import { vaporResolver } from '../src/resolution/frameworks/swift';
+import { vueResolver } from '../src/resolution/frameworks/vue';
+import { svelteResolver } from '../src/resolution/frameworks/svelte';
+import { reactResolver } from '../src/resolution/frameworks/react';
 
 const RESOLVERS: Record<string, FrameworkResolver> = {
   django: djangoResolver,
@@ -64,6 +67,9 @@ const RESOLVERS: Record<string, FrameworkResolver> = {
   rust: rustResolver,
   aspnet: aspnetResolver,
   vapor: vaporResolver,
+  vue: vueResolver,
+  svelte: svelteResolver,
+  react: reactResolver,
 };
 
 interface FixtureMeta {

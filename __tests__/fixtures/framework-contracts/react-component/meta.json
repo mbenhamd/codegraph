@@ -1,0 +1,5 @@
+{
+  "resolver": "react",
+  "sourcePath": "src/components/UserList.tsx",
+  "description": "React function component returning JSX. Produces one component node for `UserList`."
+}
