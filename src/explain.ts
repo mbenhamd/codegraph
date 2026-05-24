@@ -86,13 +86,40 @@ export interface ExplainResult {
   resolvedBy: string | null;
   /** Resolver confidence ∈ [0, 1], from `metadata.confidence`. */
   confidence: number | null;
-  /** Full `metadata` JSON for forward-compatible inspection. */
+  /**
+   * Decoded `metadata` JSON when it was an object literal. Null
+   * when absent OR when metadata was a non-object JSON value
+   * (array, scalar). For non-object metadata, the raw string is
+   * available in `rawMetadata` (PR #41 round 2 REVIEW fix — schema
+   * said "forward-compatible inspection" but arrays/scalars were
+   * silently dropped).
+   */
   metadata: Record<string, unknown> | null;
+  /**
+   * Raw JSON text of the `metadata` column when it parses to
+   * something other than a plain object (array, scalar, malformed),
+   * so legacy or unexpected shapes are inspectable instead of
+   * disappearing. `null` when metadata is absent or a clean object
+   * (the `metadata` field carries that case).
+   */
+  rawMetadata: string | null;
   /** Source node, when the row still exists. Hard FK guarantees
    *  this in v6, but defend against rare orphan rows. */
   sourceNode: ExplainNode | null;
   /** Target node, same caveat. */
   targetNode: ExplainNode | null;
+  /**
+   * Whether a full resolver strategy trace (winner + losers +
+   * per-strategy reasoning) is available for this edge. Currently
+   * always `false` — the resolver in `src/resolution/` discards
+   * loser attempts after picking a winner; only `metadata.resolvedBy`
+   * and `metadata.confidence` survive. Honest signal so consumers
+   * know this is "edge breadcrumb info", not a full causal
+   * explanation (PR #41 round 2 Codex BLOCKER scope-honesty fix).
+   * A future PR will persist `edge_resolution_traces` and flip this
+   * to `true`.
+   */
+  traceAvailable: boolean;
 }
 
 /**
@@ -174,36 +201,49 @@ function rowToNode(r: NodeRow | undefined): ExplainNode | null {
   };
 }
 
-function parseMetadata(raw: string | null): Record<string, unknown> | null {
-  if (raw === null || raw === undefined) return null;
+interface ParsedMetadata {
+  /** Object form, populated only when JSON parsed to a plain object. */
+  metadata: Record<string, unknown> | null;
+  /**
+   * Raw JSON text when the metadata column had content but didn't
+   * parse to a plain object — arrays, scalars, or malformed JSON.
+   * Lets users inspect unexpected shapes instead of silently
+   * getting `null` (PR #41 round 2 REVIEW fix).
+   */
+  rawMetadata: string | null;
+}
+
+function parseMetadata(raw: string | null): ParsedMetadata {
+  if (raw === null || raw === undefined) return { metadata: null, rawMetadata: null };
   try {
     const v = JSON.parse(raw);
     if (v && typeof v === 'object' && !Array.isArray(v)) {
-      return v as Record<string, unknown>;
+      return { metadata: v as Record<string, unknown>, rawMetadata: null };
     }
-    return null;
+    // Array or scalar — keep the raw string visible.
+    return { metadata: null, rawMetadata: raw };
   } catch {
-    return null;
+    return { metadata: null, rawMetadata: raw };
   }
 }
 
 function edgeToResult(db: SqliteReadOnly, edge: EdgeRow): ExplainResult {
-  const metadata = parseMetadata(edge.metadata);
+  const parsed = parseMetadata(edge.metadata);
   let resolvedBy: string | null = null;
   let confidence: number | null = null;
-  if (metadata) {
-    if (typeof metadata.resolvedBy === 'string') resolvedBy = metadata.resolvedBy;
+  if (parsed.metadata) {
+    if (typeof parsed.metadata.resolvedBy === 'string') resolvedBy = parsed.metadata.resolvedBy;
     // Confidence is a probability ∈ [0, 1] per the resolver contract;
     // values outside that range or non-finite are dropped to null so
     // the top-level `confidence` field always validates against the
     // JSON schema's bounded type.
     if (
-      typeof metadata.confidence === 'number' &&
-      Number.isFinite(metadata.confidence) &&
-      metadata.confidence >= 0 &&
-      metadata.confidence <= 1
+      typeof parsed.metadata.confidence === 'number' &&
+      Number.isFinite(parsed.metadata.confidence) &&
+      parsed.metadata.confidence >= 0 &&
+      parsed.metadata.confidence <= 1
     ) {
-      confidence = metadata.confidence;
+      confidence = parsed.metadata.confidence;
     }
   }
 
@@ -223,9 +263,14 @@ function edgeToResult(db: SqliteReadOnly, edge: EdgeRow): ExplainResult {
     extractorProvenance: edge.provenance,
     resolvedBy,
     confidence,
-    metadata,
+    metadata: parsed.metadata,
+    rawMetadata: parsed.rawMetadata,
     sourceNode,
     targetNode,
+    // The resolver doesn't persist loser strategies anywhere yet,
+    // so a full causal trace is never available. See ExplainResult
+    // docstring for the future-PR plan.
+    traceAvailable: false,
   };
 }
 
@@ -330,11 +375,18 @@ export function formatExplainNarrative(r: ExplainResult): string {
     r.confidence !== null ? r.confidence.toFixed(2) : 'unknown';
   const resolvedBy = r.resolvedBy ?? 'unknown';
   const extractor = r.extractorProvenance ?? 'unknown';
+  // PR #41 round 2 scope-honesty fix: surface that only the winner's
+  // breadcrumb is persisted. A future PR will add full resolver
+  // strategy traces.
+  const traceLine = r.traceAvailable
+    ? '  trace:      full resolver strategy log available\n'
+    : '  trace:      breadcrumbs only (resolver loser strategies not persisted; see traceAvailable=false)\n';
   return (
     `edge #${r.edgeId} [${r.kind}]\n` +
     `  ${srcLabel}\n` +
     `  → ${tgtLabel}\n` +
     `  resolver:   ${resolvedBy} (confidence ${confidence})\n` +
-    `  extractor:  ${extractor}`
+    `  extractor:  ${extractor}\n` +
+    traceLine.trimEnd()
   );
 }

@@ -21,8 +21,10 @@
         "resolvedBy",
         "confidence",
         "metadata",
+        "rawMetadata",
         "sourceNode",
-        "targetNode"
+        "targetNode",
+        "traceAvailable"
       ],
       "properties": {
         "tool": { "const": "explain" },
@@ -47,11 +49,19 @@
           "maximum": 1
         },
         "metadata": {
-          "description": "The full raw metadata JSON object, for forward-compatible inspection.",
+          "description": "Decoded metadata JSON when it was a plain object. Null when absent OR when metadata was a non-object value — see rawMetadata for that case.",
           "type": ["object", "null"]
         },
+        "rawMetadata": {
+          "description": "Raw JSON text of the metadata column when it parses to a non-object value (array, scalar, malformed). Null when metadata is absent or a clean object (then `metadata` carries it).",
+          "type": ["string", "null"]
+        },
         "sourceNode": { "oneOf": [{ "$ref": "#/definitions/node" }, { "type": "null" }] },
-        "targetNode": { "oneOf": [{ "$ref": "#/definitions/node" }, { "type": "null" }] }
+        "targetNode": { "oneOf": [{ "$ref": "#/definitions/node" }, { "type": "null" }] },
+        "traceAvailable": {
+          "description": "Whether a full resolver strategy trace (winner + losers + per-strategy reasoning) is persisted for this edge. Currently always `false` — the resolver discards loser attempts. Honest signal so consumers know this is edge-breadcrumb info, not a causal explanation.",
+          "type": "boolean"
+        }
       }
     }
   ],

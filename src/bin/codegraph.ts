@@ -240,6 +240,22 @@ type GraphRelationEntry = {
    * or pre-insert edges).
    */
   edgeId?: number;
+  /**
+   * Canonical edge identity — survives rebuilds. PR #41 round 2
+   * Codex BLOCKER fix: the round-trip claim "fall back to
+   * canonical lookup if edgeId is invalidated" was broken because
+   * the JSON only carried the neighbour node's `kind`, not the
+   * edge kind, and omitted source/target/line/col entirely. Now
+   * present so consumers can pipe `callers --json | explain
+   * --source X --target Y --kind Z` reliably.
+   */
+  edge?: {
+    kind: string;
+    source: string;
+    target: string;
+    line?: number | null;
+    col?: number | null;
+  };
   /** Raw edge — internal; stripped from JSON via the toJSON hook below. */
   _edge?: Edge;
   toJSON?: () => unknown;
@@ -266,6 +282,13 @@ function collectGraphRelations(
         ...(prov.confidence !== undefined ? { confidence: prov.confidence } : {}),
         ...(prov.resolvedBy ? { resolvedBy: prov.resolvedBy } : {}),
         ...(edge.id !== undefined ? { edgeId: edge.id } : {}),
+        edge: {
+          kind: edge.kind,
+          source: edge.source,
+          target: edge.target,
+          line: edge.line ?? null,
+          col: edge.column ?? null,
+        },
         _edge: edge,
       };
       // Hide _edge from JSON output without losing it for terminal rendering.
@@ -1442,6 +1465,22 @@ program
           await import('../explain');
 
         let result;
+        // Reject mixed-mode invocations up front. The two lookup
+        // paths take different identifiers; silently preferring one
+        // hides user typos. PR #41 round 2 REVIEW fix.
+        const hasCanonicalFlag =
+          options.source !== undefined ||
+          options.target !== undefined ||
+          options.kind !== undefined ||
+          options.line !== undefined ||
+          options.col !== undefined;
+        if (edgeIdArg !== undefined && hasCanonicalFlag) {
+          error(
+            'Provide either a positional <edgeId> or canonical flags (--source/--target/--kind[/--line/--col]), not both.',
+          );
+          process.exit(1);
+          return;
+        }
         if (edgeIdArg !== undefined) {
           if (!/^[1-9]\d*$/.test(edgeIdArg)) {
             error(`edgeId must be a positive integer, got: ${edgeIdArg}`);

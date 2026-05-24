@@ -107,12 +107,27 @@ describe('PF-613 follow-up: CLI JSON schema validation', () => {
     }
   });
 
-  itIfDist('callers output conforms to schemas/cli/callers.json', () => {
+  itIfDist('callers output conforms to schemas/cli/callers.json (incl. canonical edge identity)', () => {
     projectDir = setupProject();
     try {
       const validate = loadValidator('callers');
-      const out = runCliJson(['callers', 'impl', '-p', projectDir, '--json']);
+      const out = runCliJson(['callers', 'impl', '-p', projectDir, '--json']) as {
+        callers?: Array<{
+          edge?: { kind: string; source: string; target: string; line?: number | null; col?: number | null };
+          edgeId?: number;
+        }>;
+      };
       expectValid(validate, out);
+      // PR #41 round 2 BLOCKER fix: every relation must carry the
+      // canonical edge identity needed for `codegraph explain
+      // --source/--target/--kind` round-trip, not just `edgeId`.
+      if (out.callers && out.callers.length > 0) {
+        const first = out.callers[0]!;
+        expect(first.edge, 'callers[0].edge must be present').toBeDefined();
+        expect(typeof first.edge!.kind).toBe('string');
+        expect(typeof first.edge!.source).toBe('string');
+        expect(typeof first.edge!.target).toBe('string');
+      }
     } finally {
       cleanup();
     }

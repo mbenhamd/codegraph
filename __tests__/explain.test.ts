@@ -152,32 +152,59 @@ describe('PF-693: explainEdge', () => {
         'export function b(): number { return helper(); }\n',
     });
     const edges = listEdges(fixture.dbPath);
-    const calls = edges.filter((e) => e.kind === 'calls' && e.target.includes('helper'));
-    // Both calls share the same target node; if only one was emitted,
-    // the resolver may have deduplicated and the ambiguity case
-    // doesn't fire. Skip the assertion in that situation rather than
-    // pretending the test ran.
-    if (calls.length < 2) {
-      return;
-    }
-    // Pick a (source, target, kind) tuple that is repeated.
-    const grouped = new Map<string, typeof calls>();
-    for (const e of calls) {
-      const k = `${e.source}\x1f${e.target}\x1f${e.kind}`;
-      const v = grouped.get(k) ?? [];
-      v.push(e);
-      grouped.set(k, v);
-    }
-    const repeated = [...grouped.entries()].find(([, v]) => v.length > 1);
-    if (!repeated) return;
-    const [, dupes] = repeated;
-    expect(() =>
-      explainEdgeByCanonical(fixture!.dbPath, {
-        source: dupes[0].source,
-        target: dupes[0].target,
+    // Hand-built ambiguity fixture: insert two distinct call-site
+    // edges with the same (source, target, kind) but different
+    // line/col. The skip-on-precondition pattern from PR #41 round
+    // 1 was unreliable — Codex flagged it because the resolver may
+    // deduplicate and the test silently passes for the wrong
+    // reason. PR #41 round 2 fix.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite') as {
+      DatabaseSync: new (p: string) => { exec(sql: string): void; close(): void };
+    };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-explain-amb-'));
+    const dbPath = path.join(dir, 'amb.db');
+    try {
+      const db = new DatabaseSync(dbPath);
+      db.exec(`CREATE TABLE nodes(
+        id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT,
+        file_path TEXT, language TEXT,
+        start_line INT, end_line INT, start_column INT, end_column INT,
+        signature TEXT)`);
+      db.exec(`CREATE TABLE edges(
+        id INTEGER PRIMARY KEY, source TEXT, target TEXT, kind TEXT,
+        metadata TEXT, line INT, col INT, provenance TEXT)`);
+      db.exec(`INSERT INTO nodes VALUES('src-id', 'function', 'caller', 'src/a.ts::caller',
+        'src/a.ts', 'typescript', 1, 10, 0, 0, NULL)`);
+      db.exec(`INSERT INTO nodes VALUES('tgt-id', 'function', 'callee', 'src/b.ts::callee',
+        'src/b.ts', 'typescript', 1, 3, 0, 0, NULL)`);
+      // Two call sites at the same (source, target, kind) — must
+      // produce ambiguity.
+      db.exec(`INSERT INTO edges(source, target, kind, line, col)
+        VALUES('src-id', 'tgt-id', 'calls', 3, 5)`);
+      db.exec(`INSERT INTO edges(source, target, kind, line, col)
+        VALUES('src-id', 'tgt-id', 'calls', 7, 5)`);
+      db.close();
+
+      expect(() =>
+        explainEdgeByCanonical(dbPath, {
+          source: 'src-id',
+          target: 'tgt-id',
+          kind: 'calls',
+        }),
+      ).toThrow(/ambiguous|--line/i);
+
+      // Disambiguating with --line resolves it.
+      const result = explainEdgeByCanonical(dbPath, {
+        source: 'src-id',
+        target: 'tgt-id',
         kind: 'calls',
-      }),
-    ).toThrow(/ambiguous|--line/i);
+        line: 7,
+      });
+      expect(result.line).toBe(7);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('errors when no edge matches the canonical identity', async () => {
@@ -269,5 +296,65 @@ describe('PF-693: explainEdge', () => {
   it('throws when the database path does not exist', () => {
     const missing = '/tmp/codegraph-explain-missing-' + Date.now() + '.db';
     expect(() => explainEdgeById(missing, 1)).toThrow(/not found/i);
+  });
+
+  it('reports traceAvailable: false (PR #41 round 2 scope-honesty BLOCKER fix)', async () => {
+    fixture = await makeProject({
+      'src/util.ts': 'export function helper(): number { return 42; }\n',
+      'src/main.ts':
+        "import { helper } from './util';\n" +
+        'export function main(): number { return helper(); }\n',
+    });
+    const edges = listEdges(fixture.dbPath);
+    const callEdge = edges.find((e) => e.kind === 'calls');
+    if (!callEdge) return;
+    const result = explainEdgeById(fixture.dbPath, callEdge.id);
+    // The resolver discards loser strategies, so a full causal
+    // trace is never available. Locking this at false catches any
+    // accidental flip to true before the resolver trace table is
+    // actually implemented.
+    expect(result.traceAvailable).toBe(false);
+  });
+
+  it('surfaces non-object metadata via rawMetadata instead of dropping it (PR #41 round 2)', () => {
+    // Hand-build a DB with edge metadata that's a JSON ARRAY
+    // (legacy / unexpected shape). parseMetadata used to silently
+    // return null; round 2 fix exposes the raw string so users
+    // know there's content they just can't interpret as an object.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite') as {
+      DatabaseSync: new (p: string) => { exec(sql: string): void; close(): void };
+    };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-explain-raw-'));
+    const dbPath = path.join(dir, 'raw.db');
+    try {
+      const db = new DatabaseSync(dbPath);
+      db.exec(`CREATE TABLE nodes(
+        id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT,
+        file_path TEXT, language TEXT,
+        start_line INT, end_line INT, start_column INT, end_column INT,
+        signature TEXT)`);
+      db.exec(`CREATE TABLE edges(
+        id INTEGER PRIMARY KEY, source TEXT, target TEXT, kind TEXT,
+        metadata TEXT, line INT, col INT, provenance TEXT)`);
+      db.exec(`INSERT INTO nodes VALUES('src', 'function', 'a', 'a', 'a.ts', 'typescript', 1, 2, 0, 0, NULL)`);
+      db.exec(`INSERT INTO nodes VALUES('tgt', 'function', 'b', 'b', 'b.ts', 'typescript', 1, 2, 0, 0, NULL)`);
+      db.exec(`INSERT INTO edges(source, target, kind, metadata, line, col)
+        VALUES('src', 'tgt', 'calls', '["legacy", "array", "shape"]', 1, 0)`);
+      db.close();
+
+      const result = explainEdgeByCanonical(dbPath, {
+        source: 'src',
+        target: 'tgt',
+        kind: 'calls',
+      });
+      expect(result.metadata).toBeNull();
+      expect(result.rawMetadata).toBe('["legacy", "array", "shape"]');
+      // No resolvedBy/confidence can be derived from a non-object.
+      expect(result.resolvedBy).toBeNull();
+      expect(result.confidence).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
