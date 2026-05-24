@@ -191,6 +191,14 @@ export class MCPServer {
   // past a boolean guard.
   private shutdownPromise: Promise<void> | null = null;
 
+  // PF-622c: handler references kept on the instance so the listeners
+  // are testable (and removable if a future stop-without-exit path
+  // ever needs it). Real shutdown still goes through stop() →
+  // process.exit(0), so no caller currently removes these — but
+  // tracking lets us assert listener count instead of leaking.
+  private signalHandler: (() => void) | null = null;
+  private stdinHandler: (() => void) | null = null;
+
   // Extra allowed roots (PF-619) — held until the default root is known
   // (after rootUri / explicit --path / cwd fallback) so the access gate can
   // be configured with the full set at once.
@@ -240,19 +248,36 @@ export class MCPServer {
     // would beat the drain on shutdown.
     this.transport.start(this.handleMessage.bind(this), () => { void this.stop(); });
 
-    // Keep the process running
+    // Keep the process running.
+    //
     // PF-622b: stop() now returns a shared shutdown promise; we don't
     // await here because Node's signal handlers can't be async, and the
     // process exits inside stop() anyway. The `void` is explicit for
     // anyone reading the handler to confirm the floating promise is
     // intentional.
-    process.on('SIGINT', () => { void this.stop(); });
-    process.on('SIGTERM', () => { void this.stop(); });
+    //
+    // PF-622c: SIGHUP joins SIGINT/SIGTERM so a terminal-disconnect
+    // (parent shell closed, ssh session dropped) routes through the
+    // same drain + exit path instead of getting Node's default
+    // behavior, which exits before the bounded stdout/stderr drain
+    // can flush the final JSON-RPC response and shutdown
+    // diagnostics.
+    //
+    // PF-622c: also track each handler reference so tests can verify
+    // listeners aren't leaked across MCPServer lifetimes. The
+    // production code uses these handlers for the life of the
+    // process — nothing currently removes them — so the goal is
+    // making leaks detectable, not exotic cleanup.
+    this.signalHandler = () => { void this.stop(); };
+    this.stdinHandler = () => { void this.stop(); };
+    process.on('SIGINT', this.signalHandler);
+    process.on('SIGTERM', this.signalHandler);
+    process.on('SIGHUP', this.signalHandler);
 
     // When the parent process (Claude Code) exits, stdin closes.
     // Detect this and shut down gracefully to prevent orphaned processes.
-    process.stdin.on('end', () => { void this.stop(); });
-    process.stdin.on('close', () => { void this.stop(); });
+    process.stdin.on('end', this.stdinHandler);
+    process.stdin.on('close', this.stdinHandler);
 
     // PPID watchdog (#277). Linux doesn't propagate parent death to children,
     // so when the MCP host (Claude Code, opencode, …) is SIGKILL'd by the OOM
