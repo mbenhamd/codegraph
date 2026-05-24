@@ -17,6 +17,7 @@ import {
 } from '../types';
 import { getParser, detectLanguage, isLanguageSupported } from './grammars';
 import { generateNodeId, getNodeText, getChildByField, getPrecedingDocstring } from './tree-sitter-helpers';
+import { computeAstHash, computeAstShapeHash, computeSigHash } from './fingerprints';
 import type { LanguageExtractor, ExtractorContext } from './tree-sitter-types';
 import { EXTRACTORS } from './languages';
 import { LiquidExtractor } from './liquid-extractor';
@@ -424,6 +425,16 @@ export class TreeSitterExtractor {
 
     const id = generateNodeId(this.filePath, kind, name, node.startPosition.row + 1);
 
+    // PF-690: compute structural fingerprints from the already-parsed
+    // tree-sitter subtree while we're still here. Council ruled the
+    // existing parse dominates index cost; hashing the in-memory tree
+    // is microseconds per symbol. Body fingerprints emitted here;
+    // callPatternHash is reserved for post-resolution population by a
+    // later PR — this PR is data infrastructure only, there is no
+    // resolution-side writer yet.
+    const astHash = computeAstHash(node, this.source);
+    const astShapeHash = computeAstShapeHash(node, this.source);
+
     const newNode: Node = {
       id,
       kind,
@@ -436,8 +447,15 @@ export class TreeSitterExtractor {
       startColumn: node.startPosition.column,
       endColumn: node.endPosition.column,
       updatedAt: Date.now(),
+      astHash,
+      astShapeHash,
       ...extra,
     };
+    // sigHash is derived from the signature field, which `extra` may
+    // have populated. Compute AFTER the spread so we hash the final
+    // signature rather than an empty one. Skip when no signature was
+    // recorded; the column stays nullable.
+    newNode.sigHash = computeSigHash(newNode.signature);
 
     this.nodes.push(newNode);
 

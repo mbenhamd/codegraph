@@ -233,13 +233,17 @@ describe('Database Connection', () => {
     db.close();
   });
 
-  it('should get schema version', () => {
+  it('should get schema version', async () => {
     const dbPath = path.join(tempDir, 'test.db');
     const db = DatabaseConnection.initialize(dbPath);
 
     const version = db.getSchemaVersion();
     expect(version).not.toBeNull();
-    expect(version?.version).toBe(5);
+    // PF-690 bumped CURRENT_SCHEMA_VERSION to 6. Cross-checked against
+    // CURRENT_SCHEMA_VERSION rather than a literal so a future bump
+    // doesn't drive-by edit two places.
+    const { CURRENT_SCHEMA_VERSION } = await import('../src/db/migrations');
+    expect(version?.version).toBe(CURRENT_SCHEMA_VERSION);
 
     db.close();
   });

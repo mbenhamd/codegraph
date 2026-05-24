@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /**
  * Migration definition
@@ -87,6 +87,54 @@ const migrations: Migration[] = [
       db.exec(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
           ON edges(source, target, kind, COALESCE(line, -1), COALESCE(col, -1));
+      `);
+    },
+  },
+  {
+    version: 6,
+    description:
+      'Add per-symbol fingerprint columns (ast_hash, ast_shape_hash, sig_hash, call_pattern_hash) for duplicate detection + drift analysis (PF-690)',
+    up: (db) => {
+      // All four columns nullable: existing rows stay NULL until the
+      // next index sweep backfills them. New nodes get populated at
+      // creation. No behavior change for code paths that don't read
+      // these columns yet — they are pure data infrastructure for
+      // future duplicate / diff / explain CLIs.
+      //
+      // Codex round 4 REVIEW: make each ALTER TABLE idempotent via
+      // `PRAGMA table_info`. Two processes opening a v5 database
+      // simultaneously could both read version 5, both enter this
+      // migration, and the second's `ALTER TABLE ADD COLUMN` would
+      // fail with "duplicate column" — even though the resulting
+      // schema is fine. Pre-checking via `table_info` collapses the
+      // second open's migration into a no-op for already-applied
+      // columns. `CREATE INDEX IF NOT EXISTS` below is already
+      // idempotent.
+      const cols = db
+        .prepare("PRAGMA table_info('nodes')")
+        .all() as Array<{ name: string }>;
+      const hasCol = (name: string): boolean => cols.some((c) => c.name === name);
+      if (!hasCol('ast_hash')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN ast_hash TEXT DEFAULT NULL');
+      }
+      if (!hasCol('ast_shape_hash')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN ast_shape_hash TEXT DEFAULT NULL');
+      }
+      if (!hasCol('sig_hash')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN sig_hash TEXT DEFAULT NULL');
+      }
+      if (!hasCol('call_pattern_hash')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN call_pattern_hash TEXT DEFAULT NULL');
+      }
+      // Lookup indexes: duplicate-detection sweeps will
+      // `WHERE ast_hash = ?` and `WHERE ast_shape_hash = ?` heavily,
+      // so prepay the index cost rather than full-table-scanning
+      // every duplicates query later. Partial-index on NOT NULL
+      // keeps the indexes tight — existing rows that never get a
+      // hash don't occupy index space.
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_nodes_ast_hash ON nodes(ast_hash) WHERE ast_hash IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_nodes_ast_shape_hash ON nodes(ast_shape_hash) WHERE ast_shape_hash IS NOT NULL;
       `);
     },
   },

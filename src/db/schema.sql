@@ -37,7 +37,15 @@ CREATE TABLE IF NOT EXISTS nodes (
     is_abstract INTEGER DEFAULT 0,
     decorators TEXT, -- JSON array
     type_parameters TEXT, -- JSON array
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    -- PF-690: per-symbol fingerprints. All nullable so existing rows
+    -- can migrate gradually and so non-extractor consumers (e.g.
+    -- synthesized route nodes from framework resolvers) don't have
+    -- to fabricate hashes for symbols without bodies.
+    ast_hash TEXT DEFAULT NULL,
+    ast_shape_hash TEXT DEFAULT NULL,
+    sig_hash TEXT DEFAULT NULL,
+    call_pattern_hash TEXT DEFAULT NULL
 );
 
 -- Edges: Relationships between nodes
@@ -144,6 +152,13 @@ CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target, kind);
 -- runs.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
     ON edges(source, target, kind, COALESCE(line, -1), COALESCE(col, -1));
+
+-- PF-690: partial indexes on fingerprint columns. Duplicate-detection
+-- sweeps will `WHERE ast_hash = ?` and `WHERE ast_shape_hash = ?`
+-- heavily. NULL rows don't occupy index space, keeping the structures
+-- tight on databases where most nodes lack bodies (route nodes, etc).
+CREATE INDEX IF NOT EXISTS idx_nodes_ast_hash ON nodes(ast_hash) WHERE ast_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_nodes_ast_shape_hash ON nodes(ast_shape_hash) WHERE ast_shape_hash IS NOT NULL;
 
 -- File indexes
 CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
