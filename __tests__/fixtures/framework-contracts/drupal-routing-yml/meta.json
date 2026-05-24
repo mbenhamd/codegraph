@@ -1,0 +1,5 @@
+{
+  "resolver": "drupal",
+  "sourcePath": "modules/custom/example/example.routing.yml",
+  "description": "Drupal routing.yml route declaration with `_controller` handler -> produces one route node referencing the controller method."
+}

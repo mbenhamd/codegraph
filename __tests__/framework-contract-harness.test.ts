@@ -53,6 +53,7 @@ import { vaporResolver } from '../src/resolution/frameworks/swift';
 import { vueResolver } from '../src/resolution/frameworks/vue';
 import { svelteResolver } from '../src/resolution/frameworks/svelte';
 import { reactResolver } from '../src/resolution/frameworks/react';
+import { drupalResolver } from '../src/resolution/frameworks/drupal';
 
 const RESOLVERS: Record<string, FrameworkResolver> = {
   django: djangoResolver,
@@ -70,6 +71,7 @@ const RESOLVERS: Record<string, FrameworkResolver> = {
   vue: vueResolver,
   svelte: svelteResolver,
   react: reactResolver,
+  drupal: drupalResolver,
 };
 
 interface FixtureMeta {
