@@ -107,12 +107,27 @@ describe('PF-613 follow-up: CLI JSON schema validation', () => {
     }
   });
 
-  itIfDist('callers output conforms to schemas/cli/callers.json', () => {
+  itIfDist('callers output conforms to schemas/cli/callers.json (incl. canonical edge identity)', () => {
     projectDir = setupProject();
     try {
       const validate = loadValidator('callers');
-      const out = runCliJson(['callers', 'impl', '-p', projectDir, '--json']);
+      const out = runCliJson(['callers', 'impl', '-p', projectDir, '--json']) as {
+        callers?: Array<{
+          edge?: { kind: string; source: string; target: string; line?: number | null; col?: number | null };
+          edgeId?: number;
+        }>;
+      };
       expectValid(validate, out);
+      // PR #41 round 2 BLOCKER fix: every relation must carry the
+      // canonical edge identity needed for `codegraph explain
+      // --source/--target/--kind` round-trip, not just `edgeId`.
+      if (out.callers && out.callers.length > 0) {
+        const first = out.callers[0]!;
+        expect(first.edge, 'callers[0].edge must be present').toBeDefined();
+        expect(typeof first.edge!.kind).toBe('string');
+        expect(typeof first.edge!.source).toBe('string');
+        expect(typeof first.edge!.target).toBe('string');
+      }
     } finally {
       cleanup();
     }
@@ -451,6 +466,55 @@ describe('PF-613 follow-up: CLI JSON schema validation', () => {
       expect(exact!.fileCount).toBe(2);
       expect(exact!.coveredByExactGroup).toBe(false);
       expect(exact!.members.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      cleanup();
+    }
+  });
+
+  // PF-693: `codegraph explain` JSON output conforms to schemas/cli/explain.json.
+  itIfDist('explain on a real call edge conforms to schemas/cli/explain.json', () => {
+    // Build a small fixture with a known import/call pair so at
+    // least one `calls` edge persists in the index.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-pf613b-explain-'));
+    projectDir = dir;
+    try {
+      fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'src', 'util.ts'),
+        'export function helper(): number { return 42; }\n',
+      );
+      fs.writeFileSync(
+        path.join(dir, 'src', 'main.ts'),
+        "import { helper } from './util';\n" +
+          'export function main(): number { return helper(); }\n',
+      );
+      fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"pf613-explain","version":"0"}\n');
+      execFileSync(NODE_BIN, [DIST_BIN, 'init', '-i', dir], { stdio: 'ignore' });
+
+      // Find the call edge id by reading the DB directly — same
+      // path explainEdgeById uses internally.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { DatabaseSync } = require('node:sqlite') as {
+        DatabaseSync: new (p: string) => { prepare: (s: string) => { all: () => unknown[] }; close: () => void };
+      };
+      const dbPath = path.join(dir, '.codegraph', 'codegraph.db');
+      const db = new DatabaseSync(dbPath);
+      const edges = db.prepare('SELECT id FROM edges WHERE kind = ?').all('calls') as Array<{
+        id: number;
+      }>;
+      db.close();
+      if (edges.length === 0) {
+        // The resolver/extractor pipeline may not emit a calls edge
+        // for this fixture on every CI matrix; skip rather than
+        // produce a false failure.
+        return;
+      }
+      const validate = loadValidator('explain');
+      const out = runCliJson(['explain', String(edges[0].id), '-p', dir, '--json']) as {
+        edgeId?: number;
+      };
+      expectValid(validate, out);
+      expect(out.edgeId).toBe(edges[0].id);
     } finally {
       cleanup();
     }

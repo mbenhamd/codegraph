@@ -24,7 +24,24 @@
           "filePath": { "type": "string" },
           "startLine": { "type": ["integer", "null"] },
           "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-          "resolvedBy": { "type": "string" }
+          "resolvedBy": { "type": "string" },
+          "edgeId": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Edge primary key (PF-693). Index-local — resets on rebuild — pasteable into `codegraph explain <edgeId>` for the same index."
+          },
+          "edge": {
+            "type": "object",
+            "description": "Canonical edge identity (PF-693 round 2). Survives rebuilds — pipe into `codegraph explain --source X --target Y --kind Z` when edgeId is stale.",
+            "required": ["kind", "source", "target"],
+            "properties": {
+              "kind": { "type": "string", "description": "Edge kind (calls, references, imports, ...)." },
+              "source": { "type": "string", "description": "Source node id." },
+              "target": { "type": "string", "description": "Target node id." },
+              "line": { "type": ["integer", "null"] },
+              "col": { "type": ["integer", "null"] }
+            }
+          }
         },
         "additionalProperties": true
       }

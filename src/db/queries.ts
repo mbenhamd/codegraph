@@ -128,6 +128,11 @@ function rowToNode(row: NodeRow): Node {
  */
 function rowToEdge(row: EdgeRow): Edge {
   return {
+    // PF-693: expose the autoincrement id so `codegraph explain`
+    // can look up an edge by the same identifier the CLI returns
+    // in callers/callees JSON. Index-local — not stable across
+    // rebuilds; see the Edge.id docstring.
+    id: row.id,
     source: row.source,
     target: row.target,
     kind: row.kind as EdgeKind,
