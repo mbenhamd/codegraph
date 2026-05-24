@@ -28,6 +28,7 @@ import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getCodeGraphDir, isInitialized } from '../directory';
+import { cliJsonEnvelope } from '../cli-json-envelope';
 import {
   extractEdgeProvenance,
   formatEdgeProvenance,
@@ -872,7 +873,7 @@ program
     try {
       if (!isInitialized(projectPath)) {
         if (options.json) {
-          console.log(JSON.stringify({ initialized: false, projectPath }));
+          console.log(JSON.stringify(cliJsonEnvelope('status', { initialized: false, projectPath })));
           return;
         }
         console.log(chalk.bold('\nCodeGraph Status\n'));
@@ -892,7 +893,7 @@ program
 
       // JSON output mode
       if (options.json) {
-        console.log(JSON.stringify({
+        console.log(JSON.stringify(cliJsonEnvelope('status', {
           initialized: true,
           projectPath,
           fileCount: stats.fileCount,
@@ -913,7 +914,7 @@ program
             modified: changes.modified.length,
             removed: changes.removed.length,
           },
-        }));
+        })));
         cg.destroy();
         return;
       }
@@ -1099,7 +1100,7 @@ program
       });
 
       if (options.json) {
-        console.log(JSON.stringify(results, null, 2));
+        console.log(JSON.stringify(cliJsonEnvelope('search', { query: search, results }), null, 2));
       } else {
         if (results.length === 0) {
           info(`No results found for "${search}"`);
@@ -1198,7 +1199,7 @@ program
           nodeCount: f.nodeCount,
           size: f.size,
         }));
-        console.log(JSON.stringify(output, null, 2));
+        console.log(JSON.stringify(cliJsonEnvelope('files', { files: output }), null, 2));
         cg.destroy();
         return;
       }
@@ -1369,7 +1370,11 @@ program
       const inventory = buildRepositoryInventory(cg, projectPath);
 
       if (options.json) {
-        console.log(JSON.stringify(inventory, null, 2));
+        // PF-613: wrap with the shared CLI JSON envelope. The
+        // inventory's own `schemaVersion: 1` is preserved inside the
+        // payload (its semantics describe the inventory shape, not
+        // the CLI envelope shape — they're independent contracts).
+        console.log(JSON.stringify(cliJsonEnvelope('inventory', { inventory }), null, 2));
         return;
       }
       console.log(chalk.bold('\nRepository Inventory\n'));
@@ -1607,7 +1612,7 @@ program
       const limited = grouped.slice(0, limit);
 
       if (options.json) {
-        console.log(JSON.stringify({ symbol, callers: limited }, null, 2));
+        console.log(JSON.stringify(cliJsonEnvelope('callers', { symbol, callers: limited }), null, 2));
       } else if (limited.length === 0) {
         info(`No callers found for "${symbol}"`);
       } else {
@@ -1670,7 +1675,7 @@ program
       const limited = grouped.slice(0, limit);
 
       if (options.json) {
-        console.log(JSON.stringify({ symbol, callees: limited }, null, 2));
+        console.log(JSON.stringify(cliJsonEnvelope('callees', { symbol, callees: limited }), null, 2));
       } else if (limited.length === 0) {
         info(`No callees found for "${symbol}"`);
       } else {
@@ -1782,14 +1787,14 @@ program
       };
 
       if (options.json) {
-        console.log(JSON.stringify({
+        console.log(JSON.stringify(cliJsonEnvelope('impact', {
           symbol,
           depth,
           nodeCount: mergedNodes.size,
           edgeCount: edges.length,
           affected: Array.from(mergedNodes.values()),
           lowConfidenceEdges: lowConfJson,
-        }, null, 2));
+        }), null, 2));
       } else if (mergedNodes.size === 0) {
         info(`No affected symbols found for "${symbol}"`);
       } else {
@@ -1945,11 +1950,11 @@ program
 
       // Output
       if (options.json) {
-        console.log(JSON.stringify({
+        console.log(JSON.stringify(cliJsonEnvelope('affected', {
           changedFiles,
           affectedTests: sortedTests,
           totalDependentsTraversed: allDependents.size,
-        }, null, 2));
+        }), null, 2));
       } else if (options.quiet) {
         for (const t of sortedTests) console.log(t);
       } else {
