@@ -746,11 +746,34 @@ export class ToolHandler {
   }
 
   /**
-   * Close all cached project connections
+   * Close all cached project connections.
+   *
+   * Dedupes by referential identity: a single CodeGraph instance can be
+   * cached under both its resolved root and the original request path
+   * (see the `set(resolvedRoot, cg)` + `set(projectPath, cg)` pattern
+   * above). Iterating `values()` would otherwise hit the same instance
+   * twice and `CodeGraph.close()` is not idempotent — `db.close()` and
+   * `fileLock.release()` both throw on a double-call, which would leak
+   * the rest of the cache mid-shutdown.
    */
   closeAll(): void {
-    for (const cg of this.projectCache.values()) {
-      cg.close();
+    const closed = new Set<CodeGraph>();
+    for (const [cacheKey, cg] of this.projectCache) {
+      if (closed.has(cg)) continue;
+      closed.add(cg);
+      try {
+        cg.close();
+      } catch (err) {
+        // Best-effort cleanup during shutdown: a failed close on one
+        // project should not block closing the others. Log to stderr
+        // (matches the rest of the MCP server's diagnostic style at
+        // src/mcp/index.ts) so genuine close regressions stay visible
+        // instead of silently disappearing into the shutdown path.
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[CodeGraph MCP] Failed to close cached project ${cacheKey}: ${msg}\n`,
+        );
+      }
     }
     this.projectCache.clear();
   }
