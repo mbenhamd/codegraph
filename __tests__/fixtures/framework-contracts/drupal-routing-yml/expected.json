@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:modules/custom/example/example.routing.yml:1:/users",
+      "kind": "route",
+      "name": "/users",
+      "qualifiedName": "modules/custom/example/example.routing.yml::example.users",
+      "filePath": "modules/custom/example/example.routing.yml",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "language": "yaml"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:modules/custom/example/example.routing.yml:1:/users",
+      "referenceName": "\\Drupal\\example\\Controller\\UserController::list",
+      "referenceKind": "references",
+      "line": 1,
+      "column": 0,
+      "filePath": "modules/custom/example/example.routing.yml",
+      "language": "yaml"
+    }
+  ]
+}

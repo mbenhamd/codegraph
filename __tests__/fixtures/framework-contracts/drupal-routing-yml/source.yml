@@ -1,0 +1,7 @@
+example.users:
+  path: '/users'
+  defaults:
+    _controller: '\Drupal\example\Controller\UserController::list'
+    _title: 'Users'
+  requirements:
+    _permission: 'access content'
