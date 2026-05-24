@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/explain.json",
+  "title": "CodeGraph CLI `explain --json` output",
+  "description": "Single-edge resolution trace. Surfaces extractor provenance, resolver strategy, confidence, raw metadata, and source/target node snapshots. The edgeId field is index-local (resets on rebuild) — round-trip stability requires the canonical (source, target, kind, line, col) identity instead.",
+  "allOf": [
+    {
+      "$ref": "https://codegraph.papersflow.ai/schemas/cli/envelope.json"
+    },
+    {
+      "type": "object",
+      "required": [
+        "tool",
+        "edgeId",
+        "source",
+        "target",
+        "kind",
+        "line",
+        "col",
+        "extractorProvenance",
+        "resolvedBy",
+        "confidence",
+        "metadata",
+        "sourceNode",
+        "targetNode"
+      ],
+      "properties": {
+        "tool": { "const": "explain" },
+        "edgeId": { "type": "integer", "minimum": 1 },
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "kind": { "type": "string" },
+        "line": { "type": ["integer", "null"] },
+        "col": { "type": ["integer", "null"] },
+        "extractorProvenance": {
+          "description": "edges.provenance column — which extractor laid down the reference (tree-sitter | scip | heuristic). Null on v5 rows or synthesized edges that didn't carry an extractor tag.",
+          "type": ["string", "null"]
+        },
+        "resolvedBy": {
+          "description": "metadata.resolvedBy strategy tag (import | framework | qualified-name | exact-match | instance-method | file-path | fuzzy). Null when the edge has no resolver metadata.",
+          "type": ["string", "null"]
+        },
+        "confidence": {
+          "description": "metadata.confidence in [0, 1]. Null when no confidence was persisted.",
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "metadata": {
+          "description": "The full raw metadata JSON object, for forward-compatible inspection.",
+          "type": ["object", "null"]
+        },
+        "sourceNode": { "oneOf": [{ "$ref": "#/definitions/node" }, { "type": "null" }] },
+        "targetNode": { "oneOf": [{ "$ref": "#/definitions/node" }, { "type": "null" }] }
+      }
+    }
+  ],
+  "definitions": {
+    "node": {
+      "type": "object",
+      "required": ["id", "qualifiedName", "filePath", "startLine", "language", "kind"],
+      "properties": {
+        "id": { "type": "string" },
+        "qualifiedName": { "type": "string" },
+        "filePath": { "type": "string" },
+        "startLine": { "type": "integer", "minimum": 0 },
+        "language": { "type": "string" },
+        "kind": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

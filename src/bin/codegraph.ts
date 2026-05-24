@@ -232,6 +232,14 @@ type GraphRelationEntry = {
   startLine?: number;
   confidence?: number;
   resolvedBy?: string;
+  /**
+   * Edge primary key — index-local, not stable across rebuilds.
+   * Exposed (PF-693) so users can pass it to `codegraph explain
+   * <edgeId>` without having to spell out the full canonical
+   * identity. Omitted when the edge row has no id (synthesized
+   * or pre-insert edges).
+   */
+  edgeId?: number;
   /** Raw edge — internal; stripped from JSON via the toJSON hook below. */
   _edge?: Edge;
   toJSON?: () => unknown;
@@ -257,6 +265,7 @@ function collectGraphRelations(
         ...(node.startLine !== undefined ? { startLine: node.startLine } : {}),
         ...(prov.confidence !== undefined ? { confidence: prov.confidence } : {}),
         ...(prov.resolvedBy ? { resolvedBy: prov.resolvedBy } : {}),
+        ...(edge.id !== undefined ? { edgeId: edge.id } : {}),
         _edge: edge,
       };
       // Hide _edge from JSON output without losing it for terminal rendering.
@@ -1381,6 +1390,111 @@ program
         console.log();
       } catch (err) {
         error(`Duplicates failed: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+    },
+  );
+
+/**
+ * codegraph explain [edgeId]
+ *
+ * PF-693: surface the full resolution trace of a single edge.
+ * Accepts either a positional integer edge id (happy path —
+ * users copy it out of `codegraph callers --json` output) or
+ * the canonical `--source <id> --target <id> --kind <k>
+ * [--line N] [--col N]` identity (rebuild-stable; required when
+ * the edge id has been invalidated by a re-index).
+ */
+program
+  .command('explain [edgeId]')
+  .description('Show why CodeGraph resolved a single edge — extractor + resolver provenance')
+  .option('-p, --path <path>', 'Project path (defaults to cwd)')
+  .option('--source <id>', 'Canonical lookup: source node id')
+  .option('--target <id>', 'Canonical lookup: target node id')
+  .option('--kind <kind>', 'Canonical lookup: edge kind (e.g. calls)')
+  .option('--line <number>', 'Canonical lookup: line number for disambiguation')
+  .option('--col <number>', 'Canonical lookup: column number for disambiguation')
+  .option('-j, --json', 'Output as JSON')
+  .action(
+    async (
+      edgeIdArg: string | undefined,
+      options: {
+        path?: string;
+        source?: string;
+        target?: string;
+        kind?: string;
+        line?: string;
+        col?: string;
+        json?: boolean;
+      },
+    ) => {
+      try {
+        const projectPath = resolveProjectPath(options.path);
+        const dbPath = path.join(getCodeGraphDir(projectPath), 'codegraph.db');
+        if (!fs.existsSync(dbPath)) {
+          error(
+            `CodeGraph index not found at ${dbPath}. Run \`codegraph init -i\` in this directory first.`,
+          );
+          process.exit(1);
+        }
+
+        const { explainEdgeById, explainEdgeByCanonical, formatExplainNarrative } =
+          await import('../explain');
+
+        let result;
+        if (edgeIdArg !== undefined) {
+          if (!/^[1-9]\d*$/.test(edgeIdArg)) {
+            error(`edgeId must be a positive integer, got: ${edgeIdArg}`);
+            process.exit(1);
+          }
+          result = explainEdgeById(dbPath, Number.parseInt(edgeIdArg, 10));
+        } else if (options.source && options.target) {
+          if (!options.kind) {
+            error(
+              'Canonical lookup requires --kind (e.g. `--kind calls`). The same source/target pair can be connected by multiple edge kinds.',
+            );
+            process.exit(1);
+            return;
+          }
+          const parseOptNum = (raw: string | undefined, label: string): number | undefined => {
+            if (raw === undefined) return undefined;
+            if (!/^\d+$/.test(raw)) {
+              error(`--${label} must be a non-negative integer, got: ${raw}`);
+              process.exit(1);
+            }
+            return Number.parseInt(raw, 10);
+          };
+          result = explainEdgeByCanonical(dbPath, {
+            source: options.source,
+            target: options.target,
+            kind: options.kind,
+            line: parseOptNum(options.line, 'line'),
+            col: parseOptNum(options.col, 'col'),
+          });
+        } else {
+          error(
+            'Provide either a positional <edgeId> (e.g. `codegraph explain 42`) or `--source <id> --target <id> --kind <k>`.',
+          );
+          process.exit(1);
+          return; // unreachable, but TS needs it
+        }
+
+        if (options.json) {
+          console.log(
+            JSON.stringify(
+              cliJsonEnvelope('explain', result as unknown as Record<string, unknown>),
+              null,
+              2,
+            ),
+          );
+          return;
+        }
+
+        console.log(chalk.bold('\nCodeGraph Edge Explanation\n'));
+        console.log(formatExplainNarrative(result));
+        console.log();
+      } catch (err) {
+        error(`Explain failed: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
       }
     },

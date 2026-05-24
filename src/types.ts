@@ -199,6 +199,14 @@ export interface Node {
  * An edge representing a relationship between two nodes
  */
 export interface Edge {
+  /**
+   * Database primary key (auto-incrementing integer). Index-local
+   * — resets on rebuild — so callers should treat it as a debug /
+   * `codegraph explain` lookup key rather than a stable contract.
+   * Absent on freshly-constructed Edge values before INSERT.
+   */
+  id?: number;
+
   /** Source node ID */
   source: string;
 

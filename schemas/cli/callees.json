@@ -24,7 +24,12 @@
           "filePath": { "type": "string" },
           "startLine": { "type": ["integer", "null"] },
           "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-          "resolvedBy": { "type": "string" }
+          "resolvedBy": { "type": "string" },
+          "edgeId": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Edge primary key (PF-693). Index-local — resets on rebuild — pasteable into `codegraph explain <edgeId>` for the same index."
+          }
         },
         "additionalProperties": true
       }
