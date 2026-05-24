@@ -89,6 +89,23 @@ export interface DuplicateGroup {
   kind: DuplicateGroupKind;
   fingerprint: string;
   members: DuplicateMember[];
+  /**
+   * Distinct file count across all members. Lets consumers
+   * distinguish "two implementations of the same function in
+   * different files" (likely refactor candidate) from "an
+   * accessor pattern repeated in the same class" (often
+   * legitimate). PR #40 round 2 REVIEW fix.
+   */
+  fileCount: number;
+  /**
+   * For Type-2 shape groups: indicates whether at least one of
+   * this group's members ALSO belongs to a Type-1 exact group
+   * with the same body. Lets users see "this shape group exists
+   * because A and B are exact-identical AND C has the same shape
+   * but different exact hash". Always `false` for exact (Type-1)
+   * groups. PR #40 round 2 REVIEW fix.
+   */
+  coveredByExactGroup: boolean;
 }
 
 export interface DuplicatesOptions {
@@ -105,6 +122,14 @@ export interface DuplicatesResult {
     shapeGroups: number;
     exactNodes: number;
     shapeNodes: number;
+    /**
+     * Fingerprint coverage at the time of this query: how many
+     * nodes (matching the requested kinds + min-lines) carry an
+     * astHash vs how many are eligible. Surfaced so consumers can
+     * tell whether a "no duplicates" result is real or an
+     * artefact of partial coverage.
+     */
+    fingerprintCoverage: FingerprintCoverageRow;
   };
 }
 
@@ -149,6 +174,58 @@ function assertSchemaSupportsFingerprints(db: SqliteReadOnly): void {
   if (!names.has('ast_hash') || !names.has('ast_shape_hash')) {
     throw new Error(
       'duplicates requires schema v6+ (PR #38 fingerprint columns). Re-run `codegraph index` to upgrade this DB.',
+    );
+  }
+}
+
+/**
+ * Coverage report for the requested kinds — how many eligible
+ * nodes carry fingerprints. Migrating to v6 only ADDED the
+ * columns; existing rows stay NULL until re-extracted (see
+ * `migrations.ts`). A user running `codegraph duplicates` on a
+ * migrated-but-not-reindexed DB would see "no duplicates" and
+ * think their code is clone-free, when really the index is just
+ * blind. Surface the gap as an explicit error rather than a
+ * silent empty result (PR #40 round 2 BLOCKER fix).
+ */
+export interface FingerprintCoverageRow {
+  eligible: number;
+  withAstHash: number;
+}
+
+function fingerprintCoverage(
+  db: SqliteReadOnly,
+  kinds: ReadonlyArray<string>,
+  minLines: number,
+): FingerprintCoverageRow {
+  const { sql: kindSql, params: kindParams } = kindClause(kinds);
+  const row = db
+    .prepare(
+      `SELECT
+         COUNT(*) AS eligible,
+         SUM(CASE WHEN ast_hash IS NOT NULL THEN 1 ELSE 0 END) AS withAstHash
+       FROM nodes
+       WHERE ${kindSql}
+         AND (end_line - start_line + 1) >= ?`,
+    )
+    .get(...kindParams, minLines) as { eligible: number | null; withAstHash: number | null };
+  return {
+    eligible: row.eligible ?? 0,
+    withAstHash: row.withAstHash ?? 0,
+  };
+}
+
+function assertFingerprintCoverage(cov: FingerprintCoverageRow): void {
+  if (cov.eligible === 0) {
+    // No nodes match the kind+min-lines filter at all. Different
+    // condition from a missing fingerprint — just return empty.
+    return;
+  }
+  if (cov.withAstHash === 0) {
+    throw new Error(
+      `duplicates: 0 of ${cov.eligible} eligible nodes have fingerprints. ` +
+        `This usually means the DB was migrated to v6 but not re-indexed. ` +
+        `Run \`codegraph index\` to refresh fingerprints.`,
     );
   }
 }
@@ -209,7 +286,7 @@ function loadGroups(
         GROUP BY ${column}
         HAVING COUNT(*) > 1
       )
-    ORDER BY ${column}, file_path, start_line
+    ORDER BY ${column}, file_path, start_line, id
   `;
   const params = [...kindParams, minLines, ...kindParams, minLines];
   const rows = db.prepare(sql).all(...params) as NodeRow[];
@@ -264,9 +341,14 @@ function suppressShapeCoveredByExact(
 
 /**
  * Compare two groups for the RFC fork 5 sort order:
- *   primary:   member count DESC (biggest clone set first)
- *   secondary: max line span DESC (largest individual symbol)
- *   tertiary:  fingerprint ASC (stable output for diffs)
+ *   primary:    member count DESC (biggest clone set first)
+ *   secondary:  max line span DESC (largest individual symbol)
+ *   tertiary:   first member filePath ASC (human-meaningful — same
+ *               clone reproducibly appears at the same output
+ *               position across rebuilds — PR #40 round 2 REVIEW
+ *               fix replacing the previous SHA-256 tie-break)
+ *   quaternary: first member startLine ASC
+ *   quinary:    fingerprint ASC (final fallback for true ties)
  */
 function compareGroups(a: DuplicateGroup, b: DuplicateGroup): number {
   if (a.members.length !== b.members.length) {
@@ -275,9 +357,26 @@ function compareGroups(a: DuplicateGroup, b: DuplicateGroup): number {
   const spanA = Math.max(...a.members.map((m) => m.endLine - m.startLine + 1));
   const spanB = Math.max(...b.members.map((m) => m.endLine - m.startLine + 1));
   if (spanA !== spanB) return spanB - spanA;
+  // Members are already sorted by file_path/start_line/id in the SQL.
+  // HAVING COUNT(*) > 1 guarantees at least 2 members per group,
+  // so members[0] is always defined — assert non-undefined for TS.
+  const aFirst = a.members[0]!;
+  const bFirst = b.members[0]!;
+  if (aFirst.filePath !== bFirst.filePath) {
+    return aFirst.filePath < bFirst.filePath ? -1 : 1;
+  }
+  if (aFirst.startLine !== bFirst.startLine) {
+    return aFirst.startLine - bFirst.startLine;
+  }
   if (a.fingerprint < b.fingerprint) return -1;
   if (a.fingerprint > b.fingerprint) return 1;
   return 0;
+}
+
+function distinctFileCount(members: DuplicateMember[]): number {
+  const files = new Set<string>();
+  for (const m of members) files.add(m.filePath);
+  return files.size;
 }
 
 /**
@@ -296,20 +395,44 @@ export function findDuplicates(
   const db = openReadOnly(dbPath);
   try {
     assertSchemaSupportsFingerprints(db);
+    const coverage = fingerprintCoverage(db, kinds, minLines);
+    assertFingerprintCoverage(coverage);
 
     const exact = loadGroups(db, 'ast_hash', kinds, minLines);
     const shapeRaw = loadGroups(db, 'ast_shape_hash', kinds, minLines);
     const shape = suppressShapeCoveredByExact(exact, shapeRaw);
 
+    // Collect member ids that belong to any exact group so shape
+    // supersets can annotate `coveredByExactGroup` (PR #40 round 2
+    // REVIEW fix). A genuine Type-2 finding has at least one
+    // member NOT in an exact group.
+    const idsInExactGroup = new Set<string>();
+    for (const members of exact.values()) {
+      for (const m of members) idsInExactGroup.add(m.id);
+    }
+
     const groups: DuplicateGroup[] = [];
     let exactNodes = 0;
     let shapeNodes = 0;
     for (const [fingerprint, members] of exact) {
-      groups.push({ kind: 'exact', fingerprint, members });
+      groups.push({
+        kind: 'exact',
+        fingerprint,
+        members,
+        fileCount: distinctFileCount(members),
+        coveredByExactGroup: false,
+      });
       exactNodes += members.length;
     }
     for (const [fingerprint, members] of shape) {
-      groups.push({ kind: 'shape', fingerprint, members });
+      const anyMemberIsExact = members.some((m) => idsInExactGroup.has(m.id));
+      groups.push({
+        kind: 'shape',
+        fingerprint,
+        members,
+        fileCount: distinctFileCount(members),
+        coveredByExactGroup: anyMemberIsExact,
+      });
       shapeNodes += members.length;
     }
     groups.sort(compareGroups);
@@ -321,6 +444,7 @@ export function findDuplicates(
         shapeGroups: shape.size,
         exactNodes,
         shapeNodes,
+        fingerprintCoverage: coverage,
       },
     };
   } finally {

@@ -218,12 +218,14 @@ describe('PF-692: findDuplicates', () => {
     expect(span0).toBeGreaterThan(span1);
   });
 
-  it('ties on member count AND span fall back to fingerprint ASC (RFC fork 5 tertiary)', async () => {
+  it('ties on member count AND span fall back to first-member filePath ASC (PR #40 round 2)', async () => {
     // Two clone pairs with identical line spans but structurally
     // different bodies (sum vs product) → different ast_hash AND
     // different ast_shape_hash, so no 4-member shape group forms.
-    // The two exact groups must sort by fingerprint ASC after the
-    // member-count and span ties.
+    // Per the PR #40 round-2 sort change (Codex pass A REVIEW),
+    // tertiary tie-break is human-meaningful filePath ASC, not
+    // SHA-256 hash. The alpha group's first member is in a.ts and
+    // bravo's is in c.ts, so alpha sorts first.
     const sumBody = `{
   const a = 1;
   const b = 2;
@@ -258,8 +260,10 @@ describe('PF-692: findDuplicates', () => {
     expect(exactGroups.length).toBe(2);
     expect(exactGroups[0].members.length).toBe(2);
     expect(exactGroups[1].members.length).toBe(2);
-    // After ties on count and span, fingerprint ASC takes over.
-    expect(exactGroups[0].fingerprint < exactGroups[1].fingerprint).toBe(true);
+    // After ties on count and span, first-member filePath ASC
+    // takes over. alpha's first member is in src/a.ts and bravo's
+    // is in src/c.ts, so alpha sorts before bravo.
+    expect(exactGroups[0].members[0].filePath < exactGroups[1].members[0].filePath).toBe(true);
   });
 
   it('suppresses shape groups that exactly cover an exact group (RFC fork 1)', async () => {
@@ -344,5 +348,88 @@ describe('PF-692: findDuplicates', () => {
     const before = snapshot(fixture.dbPath);
     findDuplicates(fixture.dbPath);
     expect(snapshot(fixture.dbPath)).toEqual(before);
+  });
+
+  it('throws when a v6 DB has zero fingerprinted rows (migrated-not-reindexed, PR #40 round 2 BLOCKER)', () => {
+    // A v6 DB that was migrated FROM v5 but never re-indexed has
+    // all fingerprint columns present but all values NULL.
+    // findDuplicates must NOT silently return [] groups — that
+    // looks like "clone-free code" when really the index is blind.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite') as {
+      DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void };
+    };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-dup-blind-'));
+    const dbPath = path.join(dir, 'blind.db');
+    try {
+      const db = new DatabaseSync(dbPath);
+      db.exec(`CREATE TABLE nodes(
+        id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT,
+        file_path TEXT, language TEXT,
+        start_line INT, end_line INT, start_column INT, end_column INT,
+        signature TEXT, ast_hash TEXT, ast_shape_hash TEXT,
+        sig_hash TEXT, call_pattern_hash TEXT)`);
+      // 3 eligible function nodes, all with NULL fingerprints
+      // (simulates migrated-not-reindexed state).
+      for (let i = 0; i < 3; i++) {
+        db.exec(
+          `INSERT INTO nodes VALUES('n${i}', 'function', 'fn${i}', 'src/a.ts::fn${i}',
+            'src/a.ts', 'typescript', ${i * 20}, ${i * 20 + 12}, 0, 0, NULL,
+            NULL, NULL, NULL, NULL)`,
+        );
+      }
+      db.close();
+      expect(() => findDuplicates(dbPath)).toThrow(
+        /0 of \d+ eligible nodes have fingerprints|re-index/i,
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('populates fileCount per group (PR #40 round 2 REVIEW)', async () => {
+    // Two same-named functions across two files → fileCount=2.
+    fixture = await makeProject({
+      'src/a.ts': `export function shared(x: number): number ${LARGE_BODY}\n`,
+      'src/b.ts': `export function shared(x: number): number ${LARGE_BODY}\n`,
+    });
+    const result = findDuplicates(fixture.dbPath);
+    const g = result.groups.find((g) => g.kind === 'exact');
+    expect(g).toBeDefined();
+    expect(g!.fileCount).toBe(2);
+  });
+
+  it('annotates shape groups with coveredByExactGroup when at least one member is also exact (PR #40 round 2 REVIEW)', async () => {
+    // Three same-shaped functions: two named `f` with identical
+    // bodies (Type-1) + one named `g` with the same shape but
+    // different ast_hash (Type-2 only). The shape group should
+    // include all three, AND coveredByExactGroup=true because
+    // members {f,f} are already an exact group.
+    fixture = await makeProject({
+      'src/a.ts': `export function f(x: number): number ${LARGE_BODY}\n`,
+      'src/b.ts': `export function f(x: number): number ${LARGE_BODY}\n`,
+      'src/c.ts': `export function g(x: number): number ${LARGE_BODY}\n`,
+    });
+    const result = findDuplicates(fixture.dbPath);
+    const shape = result.groups.find((g) => g.kind === 'shape');
+    if (!shape) return; // fixture variant
+    expect(shape.coveredByExactGroup).toBe(true);
+    expect(shape.members.length).toBeGreaterThanOrEqual(3);
+    // The exact group always has coveredByExactGroup=false.
+    const exact = result.groups.find((g) => g.kind === 'exact');
+    expect(exact!.coveredByExactGroup).toBe(false);
+  });
+
+  it('exposes fingerprintCoverage in summary', async () => {
+    fixture = await makeProject({
+      'src/a.ts': `export function fa(x: number): number ${LARGE_BODY}\n`,
+      'src/b.ts': `export function fb(x: number): number ${LARGE_BODY}\n`,
+    });
+    const result = findDuplicates(fixture.dbPath);
+    expect(result.summary.fingerprintCoverage.eligible).toBeGreaterThan(0);
+    expect(result.summary.fingerprintCoverage.withAstHash).toBeGreaterThan(0);
+    expect(result.summary.fingerprintCoverage.withAstHash).toBeLessThanOrEqual(
+      result.summary.fingerprintCoverage.eligible,
+    );
   });
 });

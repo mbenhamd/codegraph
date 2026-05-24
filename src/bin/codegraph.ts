@@ -1298,7 +1298,8 @@ program
           minLines = Number.parseInt(options.minLines, 10);
         }
 
-        const { findDuplicates } = await import('../duplicates');
+        const { findDuplicates, DEFAULT_DUPLICATE_KINDS, DEFAULT_MIN_LINES } =
+          await import('../duplicates');
         const result = findDuplicates(dbPath, { kinds, minLines });
 
         if (options.json) {
@@ -1313,8 +1314,18 @@ program
         }
 
         const s = result.summary;
+        const usedKinds = kinds ?? DEFAULT_DUPLICATE_KINDS;
+        const usedMinLines = minLines ?? DEFAULT_MIN_LINES;
+        const cov = s.fingerprintCoverage;
+
         console.log(chalk.bold('\nCodeGraph Duplicates\n'));
         console.log(chalk.cyan('Database:'), dbPath);
+        console.log(
+          chalk.dim(
+            `  kinds=${usedKinds.join(',')}  min-lines=${usedMinLines}  ` +
+              `coverage=${cov.withAstHash}/${cov.eligible} eligible nodes have fingerprints`,
+          ),
+        );
         console.log();
         console.log(chalk.bold('Summary:'));
         console.log(`  Exact clone groups (Type-1):  ${formatNumber(s.exactGroups)}`);
@@ -1324,18 +1335,28 @@ program
         console.log();
 
         if (result.groups.length === 0) {
-          console.log(chalk.dim('No duplicate groups found above the minimum size threshold.'));
+          console.log(
+            chalk.dim(
+              `No duplicate groups found with kinds=${usedKinds.join(',')}, ` +
+                `min-lines=${usedMinLines}, ${cov.withAstHash}/${cov.eligible} ` +
+                `eligible nodes have fingerprints.`,
+            ),
+          );
           return;
         }
 
         const shown = result.groups.slice(0, 20);
+        const totalHiddenMembers = result.groups
+          .reduce((acc, g) => acc + Math.max(0, g.members.length - 5), 0);
         console.log(chalk.bold(`Groups (first ${shown.length} of ${result.groups.length}):`));
         for (const g of shown) {
+          const tag = g.kind === 'shape' && g.coveredByExactGroup ? ' [contains exact subset]' : '';
           console.log(
             chalk.cyan(g.kind.padEnd(6)) +
               chalk.dim(g.fingerprint.slice(0, 12)) +
               ' ' +
-              chalk.white(`${g.members.length} members`),
+              chalk.white(`${g.members.length} members in ${g.fileCount} file(s)`) +
+              chalk.yellow(tag),
           );
           for (const m of g.members.slice(0, 5)) {
             console.log(
@@ -1345,8 +1366,17 @@ program
             );
           }
           if (g.members.length > 5) {
-            console.log(chalk.dim(`  …+${g.members.length - 5} more`));
+            console.log(chalk.dim(`  …+${g.members.length - 5} more members`));
           }
+        }
+        if (result.groups.length > shown.length || totalHiddenMembers > 0) {
+          console.log();
+          console.log(
+            chalk.yellow(
+              `Output truncated: ${result.groups.length - shown.length} more group(s) ` +
+                `and ${totalHiddenMembers} more member(s) hidden. Use --json for full output.`,
+            ),
+          );
         }
         console.log();
       } catch (err) {

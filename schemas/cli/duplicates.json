@@ -18,12 +18,27 @@
         },
         "summary": {
           "type": "object",
-          "required": ["exactGroups", "shapeGroups", "exactNodes", "shapeNodes"],
+          "required": [
+            "exactGroups",
+            "shapeGroups",
+            "exactNodes",
+            "shapeNodes",
+            "fingerprintCoverage"
+          ],
           "properties": {
             "exactGroups": { "type": "integer", "minimum": 0 },
             "shapeGroups": { "type": "integer", "minimum": 0 },
             "exactNodes": { "type": "integer", "minimum": 0 },
-            "shapeNodes": { "type": "integer", "minimum": 0 }
+            "shapeNodes": { "type": "integer", "minimum": 0 },
+            "fingerprintCoverage": {
+              "type": "object",
+              "required": ["eligible", "withAstHash"],
+              "properties": {
+                "eligible": { "type": "integer", "minimum": 0 },
+                "withAstHash": { "type": "integer", "minimum": 0 }
+              },
+              "additionalProperties": false
+            }
           },
           "additionalProperties": false
         }
@@ -33,7 +48,7 @@
   "definitions": {
     "group": {
       "type": "object",
-      "required": ["kind", "fingerprint", "members"],
+      "required": ["kind", "fingerprint", "members", "fileCount", "coveredByExactGroup"],
       "properties": {
         "kind": {
           "type": "string",
@@ -48,6 +63,15 @@
           "type": "array",
           "minItems": 2,
           "items": { "$ref": "#/definitions/member" }
+        },
+        "fileCount": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Distinct file count across all members."
+        },
+        "coveredByExactGroup": {
+          "type": "boolean",
+          "description": "For shape groups: true when at least one member also belongs to an exact group (Type-1 subset inside Type-2 finding). Always false for exact groups."
         }
       },
       "additionalProperties": false
