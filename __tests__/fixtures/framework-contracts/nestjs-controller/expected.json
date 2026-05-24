@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:src/users/users.controller.ts:5:GET:/users",
+      "kind": "route",
+      "name": "GET /users",
+      "qualifiedName": "src/users/users.controller.ts::GET:/users",
+      "filePath": "src/users/users.controller.ts",
+      "startLine": 5,
+      "endLine": 5,
+      "startColumn": 0,
+      "endColumn": 6,
+      "language": "typescript"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:src/users/users.controller.ts:5:GET:/users",
+      "referenceName": "findAll",
+      "referenceKind": "references",
+      "line": 5,
+      "column": 0,
+      "filePath": "src/users/users.controller.ts",
+      "language": "typescript"
+    }
+  ]
+}

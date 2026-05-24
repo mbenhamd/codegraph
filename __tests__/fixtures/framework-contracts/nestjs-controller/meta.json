@@ -1,0 +1,5 @@
+{
+  "resolver": "nestjs",
+  "sourcePath": "src/users/users.controller.ts",
+  "description": "NestJS `@Controller('users')` + `@Get()` — joins prefix and method path, references the handler method."
+}

@@ -1,0 +1,5 @@
+{
+  "resolver": "laravel",
+  "sourcePath": "routes/web.php",
+  "description": "Laravel `Route::get('/users', [UserController::class, 'index'])` — produces one route node referencing the controller action."
+}
