@@ -25,6 +25,7 @@ import { SvelteExtractor } from './svelte-extractor';
 import { DfmExtractor } from './dfm-extractor';
 import { VueExtractor } from './vue-extractor';
 import { extractFromCss } from './css-extractor';
+import { extractJsxClassNames } from './classname-extractor';
 import {
   getAllFrameworkResolvers,
   getApplicableFrameworks,
@@ -227,6 +228,27 @@ export class TreeSitterExtractor {
       this.nodeStack.push(fileNode.id);
       this.visitNode(this.tree.rootNode);
       this.nodeStack.pop();
+
+      // PF-696: JSX className → CSS selector bridge. Runs after the
+      // main extraction walk so containing nodes are already in
+      // `this.nodes`. Default config opts OUT of Tailwind utilities
+      // (BEM-by-ADR for papersflow); flip via env var to opt in.
+      if (this.language === 'tsx' || this.language === 'jsx') {
+        const tailwindOpt = process.env.CODEGRAPH_INCLUDE_TAILWIND === '1';
+        const cnResult = extractJsxClassNames(
+          this.tree,
+          this.source,
+          this.filePath,
+          this.nodes,
+          { tailwind: tailwindOpt },
+        );
+        this.unresolvedReferences.push(...cnResult.references);
+        for (const n of this.nodes) {
+          if (cnResult.dynamicClassNodes.has(n.id)) {
+            (n as Node & { hasDynamicClassNames?: boolean }).hasDynamicClassNames = true;
+          }
+        }
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
 
