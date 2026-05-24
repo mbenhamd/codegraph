@@ -25,18 +25,38 @@ path:
   `schemaVersion` doesn't clobber the envelope's).
 - `files.json` — `codegraph files --json`.
 
+## Contract guarantee
+
+Every `--json` invocation of an in-scope subcommand emits a valid
+envelope on **every** result path — success, empty, not-found, and
+input-validation success-with-no-input. The text branches still
+print human-readable messages, but `--json` is contract-stable.
+
+Not-found / empty paths surface extra optional fields so consumers
+can branch on them without inspecting payload shape:
+
+- `callers` / `callees` / `impact`: `notFound: true` when the
+  symbol is not in the index. The result array (`callers`, `callees`,
+  `affected`) is `[]` and `impact` reports `nodeCount: 0`,
+  `edgeCount: 0`. Consumers can distinguish "symbol absent" from
+  "symbol exists but result is empty".
+- `files`: `reason` is `"not_indexed"` when the project IS
+  initialized but the file index is empty (typically requires running
+  `codegraph index`), or `"no_matches"` when filters left no rows.
+  `files` is `[]`. A completely uninitialized project remains a
+  plain-text error path with `process.exit(1)`.
+
+`status` already emits `initialized: false` on the not-initialized
+path; `affected` emits an empty envelope when no input files are
+provided.
+
 ## Out of scope (separate emitters)
 
 - `codegraph benchmark --json` does not flow through
-  `cliJsonEnvelope`; its report shape is owned by `printBenchmarkReport`
-  and is not covered by these schemas.
-- Some subcommands print a plain-text "no result" line and return
-  without emitting any JSON when the symbol/file is missing or the
-  result is empty (e.g. `callers`/`callees`/`impact` with an unknown
-  symbol; `files` with no matches). These not-found branches are
-  intentional and are not exercised by the contract tests. Wrapping
-  them in an enveloped empty payload would be a follow-up PR, not
-  part of this contract slice.
+  `cliJsonEnvelope`; its report shape is owned by
+  `printBenchmarkReport` and is not covered by these schemas.
+- Error paths that call `process.exit(1)` still emit a plain-text
+  error to stderr; an enveloped JSON error variant is a follow-up.
 
 ## Versioning
 
@@ -49,6 +69,17 @@ data shape; that version evolves independently of the envelope.
 Per-tool schemas set `additionalProperties: true` at both the top
 level and inside nested objects so payloads can grow without
 breaking older consumers.
+
+> **Schema posture:** schemas validate **known** fields (types,
+> enums, required-vs-optional) but **do not reject unknown** top-level
+> fields. This is intentional — adding an optional field to a future
+> payload must not break consumers validating against today's schema.
+> The trade-off is that emitter-side typos like `notFnd` instead of
+> `notFound` are NOT caught by schema validation alone. The
+> `cli-json-schemas.test.ts` suite asserts both schema validity AND
+> the exact value of new optional flags (e.g.
+> `expect(out.notFound).toBe(true)`) so typos surface at the emission
+> boundary.
 
 ### Additive vs. breaking matrix
 

@@ -1168,7 +1168,17 @@ program
       let files = cg.getFiles();
 
       if (files.length === 0) {
-        info('No files indexed. Run "codegraph index" first.');
+        // --json must always emit the envelope. reason=not_indexed fires
+        // when the project is initialized but `cg.getFiles()` returns
+        // nothing — typically before `codegraph index` has populated the
+        // file table. Fully uninitialized projects already exit(1) above.
+        if (options.json) {
+          console.log(
+            JSON.stringify(cliJsonEnvelope('files', { files: [], reason: 'not_indexed' }), null, 2),
+          );
+        } else {
+          info('No files indexed. Run "codegraph index" first.');
+        }
         cg.destroy();
         return;
       }
@@ -1186,7 +1196,13 @@ program
       }
 
       if (files.length === 0) {
-        info('No files found matching the criteria.');
+        if (options.json) {
+          console.log(
+            JSON.stringify(cliJsonEnvelope('files', { files: [], reason: 'no_matches' }), null, 2),
+          );
+        } else {
+          info('No files found matching the criteria.');
+        }
         cg.destroy();
         return;
       }
@@ -1598,7 +1614,17 @@ program
 
       const matches = cg.searchNodes(symbol, { limit: 50 });
       if (matches.length === 0) {
-        info(`Symbol "${symbol}" not found`);
+        if (options.json) {
+          console.log(
+            JSON.stringify(
+              cliJsonEnvelope('callers', { symbol, callers: [], notFound: true }),
+              null,
+              2,
+            ),
+          );
+        } else {
+          info(`Symbol "${symbol}" not found`);
+        }
         cg.destroy();
         return;
       }
@@ -1661,7 +1687,17 @@ program
 
       const matches = cg.searchNodes(symbol, { limit: 50 });
       if (matches.length === 0) {
-        info(`Symbol "${symbol}" not found`);
+        if (options.json) {
+          console.log(
+            JSON.stringify(
+              cliJsonEnvelope('callees', { symbol, callees: [], notFound: true }),
+              null,
+              2,
+            ),
+          );
+        } else {
+          info(`Symbol "${symbol}" not found`);
+        }
         cg.destroy();
         return;
       }
@@ -1720,11 +1756,37 @@ program
 
       const { default: CodeGraph } = await loadCodeGraph();
       const cg = await CodeGraph.open(projectPath);
-      const depth = Math.min(Math.max(parseInt(options.depth || '2', 10), 1), 10);
+      // Validate --depth early so the not-found JSON branch can never emit
+      // depth=NaN (which would serialize as null and violate impact.json's
+      // schema). NaN propagates through Math.min/max, so check up front.
+      const depthRaw = options.depth ?? '2';
+      const depthParsed = parseInt(depthRaw, 10);
+      if (!Number.isFinite(depthParsed)) {
+        error(`Invalid --depth: ${depthRaw}`);
+        process.exit(1);
+      }
+      const depth = Math.min(Math.max(depthParsed, 1), 10);
 
       const matches = cg.searchNodes(symbol, { limit: 50 });
       if (matches.length === 0) {
-        info(`Symbol "${symbol}" not found`);
+        if (options.json) {
+          console.log(
+            JSON.stringify(
+              cliJsonEnvelope('impact', {
+                symbol,
+                depth,
+                nodeCount: 0,
+                edgeCount: 0,
+                affected: [],
+                notFound: true,
+              }),
+              null,
+              2,
+            ),
+          );
+        } else {
+          info(`Symbol "${symbol}" not found`);
+        }
         cg.destroy();
         return;
       }
@@ -1876,13 +1938,34 @@ program
       }
 
       if (changedFiles.length === 0) {
-        if (!options.quiet) info('No files provided. Use file arguments or --stdin.');
+        if (options.json) {
+          console.log(
+            JSON.stringify(
+              cliJsonEnvelope('affected', {
+                changedFiles: [],
+                affectedTests: [],
+                totalDependentsTraversed: 0,
+              }),
+              null,
+              2,
+            ),
+          );
+        } else if (!options.quiet) {
+          info('No files provided. Use file arguments or --stdin.');
+        }
         process.exit(0);
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
       const cg = await CodeGraph.open(projectPath);
-      const maxDepth = parseInt(options.depth || '5', 10);
+      // Same NaN guard as `impact --depth`: NaN >= NaN is always false,
+      // which silently disables the BFS depth cap. Reject early instead.
+      const maxDepthRaw = options.depth ?? '5';
+      const maxDepth = parseInt(maxDepthRaw, 10);
+      if (!Number.isFinite(maxDepth)) {
+        error(`Invalid --depth: ${maxDepthRaw}`);
+        process.exit(1);
+      }
 
       // Common test file patterns
       const defaultTestPatterns = [
