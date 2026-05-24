@@ -1,0 +1,5 @@
+{
+  "resolver": "express",
+  "sourcePath": "src/routes/users.ts",
+  "description": "Express `app.get('/users', listUsers)` — produces one route node referencing the handler function."
+}

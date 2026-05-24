@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:routes/web.php:6:GET:/users",
+      "kind": "route",
+      "name": "GET /users",
+      "qualifiedName": "routes/web.php::route:/users",
+      "filePath": "routes/web.php",
+      "startLine": 6,
+      "endLine": 6,
+      "startColumn": 0,
+      "endColumn": 54,
+      "language": "php"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:routes/web.php:6:GET:/users",
+      "referenceName": "index",
+      "referenceKind": "references",
+      "line": 6,
+      "column": 0,
+      "filePath": "routes/web.php",
+      "language": "php"
+    }
+  ]
+}

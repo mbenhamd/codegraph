@@ -1,0 +1,5 @@
+{
+  "resolver": "rails",
+  "sourcePath": "config/routes.rb",
+  "description": "Rails `get '/users', to: 'users#index'` — produces one route node referencing the controller action."
+}

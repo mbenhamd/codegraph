@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:config/routes.rb:2:GET:/users",
+      "kind": "route",
+      "name": "GET /users",
+      "qualifiedName": "config/routes.rb::route:/users",
+      "filePath": "config/routes.rb",
+      "startLine": 2,
+      "endLine": 2,
+      "startColumn": 0,
+      "endColumn": 31,
+      "language": "ruby"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:config/routes.rb:2:GET:/users",
+      "referenceName": "index",
+      "referenceKind": "references",
+      "line": 2,
+      "column": 0,
+      "filePath": "config/routes.rb",
+      "language": "ruby"
+    }
+  ]
+}
