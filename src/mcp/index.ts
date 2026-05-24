@@ -38,6 +38,7 @@ export interface MCPServerOptions {
 }
 import { SERVER_INSTRUCTIONS } from './server-instructions';
 import { HOST_PPID_ENV } from '../extraction/wasm-runtime-flags';
+import { drainStream } from './stdio-drain';
 
 /**
  * Convert a file:// URI to a filesystem path.
@@ -83,6 +84,7 @@ const ROOTS_LIST_TIMEOUT_MS = 5000;
  * (parent SIGKILL'd), and longer poll = less wakeup overhead while idle.
  */
 const DEFAULT_PPID_POLL_MS = 5000;
+const DEFAULT_DRAIN_TIMEOUT_MS = 2000;
 
 /**
  * Resolve the PPID watchdog poll interval from an env override. A value of
@@ -95,6 +97,23 @@ function parsePpidPollMs(raw: string | undefined): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return DEFAULT_PPID_POLL_MS;
   if (parsed < 0) return DEFAULT_PPID_POLL_MS;
+  return Math.floor(parsed);
+}
+
+/**
+ * Parse `CODEGRAPH_DRAIN_TIMEOUT_MS` (PF-622b). Caps how long shutdown
+ * waits for `process.stdout` / `process.stderr` to flush before
+ * `process.exit(0)`. `0` skips the drain entirely (the legacy synchronous
+ * exit behavior); negative or non-numeric values fall back to the
+ * default. The default is generous — a healthy pipe drains in
+ * microseconds; the cap exists for a stuck peer that has stopped
+ * reading.
+ */
+function parseDrainTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return DEFAULT_DRAIN_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_DRAIN_TIMEOUT_MS;
+  if (parsed < 0) return DEFAULT_DRAIN_TIMEOUT_MS;
   return Math.floor(parsed);
 }
 
@@ -166,10 +185,11 @@ export class MCPServer {
   // is what we'd otherwise miss. null on the direct (bundled) launch path.
   private hostPpid: number | null = parseHostPpid(process.env[HOST_PPID_ENV]);
   private ppidWatchdog: ReturnType<typeof setInterval> | null = null;
-  // Idempotency guard for stop(). Without it, the watchdog can race with the
-  // stdin `end`/`close` handlers (or SIGTERM/SIGINT) and double-close cg and
-  // the transport before process.exit() lands.
-  private stopped = false;
+  // PF-622b: shutdown coordinator. Multiple SIGINT/SIGTERM/stdin handlers
+  // can fire near-simultaneously; sharing one promise means concurrent
+  // callers all observe the same drain + exit sequence instead of racing
+  // past a boolean guard.
+  private shutdownPromise: Promise<void> | null = null;
 
   // Extra allowed roots (PF-619) — held until the default root is known
   // (after rootUri / explicit --path / cwd fallback) so the access gate can
@@ -214,16 +234,25 @@ export class MCPServer {
   async start(): Promise<void> {
     // Start listening for messages immediately - don't check initialization yet
     // We'll get the project path from the initialize request's rootUri
-    this.transport.start(this.handleMessage.bind(this));
+    // PF-622b: route the transport's stdin-close (parent dropped stdin)
+    // through stop() so the bounded drain runs before process.exit(0).
+    // Without this, the transport's default rl.on('close') -> exit(0)
+    // would beat the drain on shutdown.
+    this.transport.start(this.handleMessage.bind(this), () => { void this.stop(); });
 
     // Keep the process running
-    process.on('SIGINT', () => this.stop());
-    process.on('SIGTERM', () => this.stop());
+    // PF-622b: stop() now returns a shared shutdown promise; we don't
+    // await here because Node's signal handlers can't be async, and the
+    // process exits inside stop() anyway. The `void` is explicit for
+    // anyone reading the handler to confirm the floating promise is
+    // intentional.
+    process.on('SIGINT', () => { void this.stop(); });
+    process.on('SIGTERM', () => { void this.stop(); });
 
     // When the parent process (Claude Code) exits, stdin closes.
     // Detect this and shut down gracefully to prevent orphaned processes.
-    process.stdin.on('end', () => this.stop());
-    process.stdin.on('close', () => this.stop());
+    process.stdin.on('end', () => { void this.stop(); });
+    process.stdin.on('close', () => { void this.stop(); });
 
     // PPID watchdog (#277). Linux doesn't propagate parent death to children,
     // so when the MCP host (Claude Code, opencode, …) is SIGKILL'd by the OOM
@@ -251,7 +280,7 @@ export class MCPServer {
           process.stderr.write(
             `[CodeGraph MCP] Parent process exited (${reason}); shutting down.\n`
           );
-          this.stop();
+          void this.stop();
         }
       }, pollMs);
       this.ppidWatchdog.unref();
@@ -417,11 +446,28 @@ export class MCPServer {
   }
 
   /**
-   * Stop the server
+   * Stop the server.
+   *
+   * PF-622b: idempotent across concurrent SIGINT/SIGTERM/stdin-end calls
+   * by sharing a single shutdown promise. Awaits a bounded stdout/stderr
+   * drain before `process.exit(0)` so pipe-mode JSON-RPC responses
+   * (Node's `process.stdout.write` is async for pipes) and stderr
+   * diagnostics from `closeAll()` aren't dropped on exit.
    */
-  stop(): void {
-    if (this.stopped) return;
-    this.stopped = true;
+  stop(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    // Defer doStop to a microtask so the assignment below lands BEFORE
+    // doStop's synchronous prefix (transport.stop, closeAll, cg.close)
+    // runs. Otherwise transport.stop()'s synchronous rl.close() fires
+    // the readline 'close' event, which routes through onClose() into
+    // a reentrant stop() call — and that reentrant call would see
+    // `shutdownPromise === null` and start a SECOND doStop, double-
+    // exiting and double-closing the cache.
+    this.shutdownPromise = Promise.resolve().then(() => this.doStop());
+    return this.shutdownPromise;
+  }
+
+  private async doStop(): Promise<void> {
     if (this.ppidWatchdog) {
       clearInterval(this.ppidWatchdog);
       this.ppidWatchdog = null;
@@ -430,10 +476,19 @@ export class MCPServer {
     this.toolHandler.closeAll();
     // Close the main CodeGraph instance
     if (this.cg) {
-      this.cg.close();
+      try { this.cg.close(); } catch { /* swallow; closeAll-style during shutdown */ }
       this.cg = null;
     }
     this.transport.stop();
+    // Bounded drain: stdout typically holds the last JSON-RPC response,
+    // stderr typically holds shutdown diagnostics. 2000ms is generous —
+    // a healthy pipe drains in microseconds; the cap exists for a stuck
+    // peer that has stopped reading.
+    const drainTimeoutMs = parseDrainTimeoutMs(process.env.CODEGRAPH_DRAIN_TIMEOUT_MS);
+    await Promise.all([
+      drainStream(process.stdout, drainTimeoutMs),
+      drainStream(process.stderr, drainTimeoutMs),
+    ]);
     process.exit(0);
   }
 

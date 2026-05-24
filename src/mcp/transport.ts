@@ -63,6 +63,13 @@ export type MessageHandler = (message: JsonRpcRequest | JsonRpcNotification) => 
 export class StdioTransport {
   private rl: readline.Interface | null = null;
   private messageHandler: MessageHandler | null = null;
+  // PF-622b: callback invoked when readline emits 'close' (stdin EOF or
+  // an in-process `rl.close()`). Defaults to `process.exit(0)` so the
+  // legacy standalone usage keeps working; MCPServer overrides it to
+  // route through the bounded stdio drain. Without this hook, calling
+  // `transport.stop()` mid-shutdown would synchronously trigger
+  // `process.exit(0)` and skip the drain entirely.
+  private onClose: () => void = () => process.exit(0);
   // Outstanding server-initiated requests (e.g. roots/list), keyed by the id
   // we sent. Responses from the client are matched back here.
   private pending = new Map<string | number, {
@@ -72,10 +79,17 @@ export class StdioTransport {
   private nextRequestId = 1;
 
   /**
-   * Start listening for messages on stdin
+   * Start listening for messages on stdin.
+   *
+   * `onClose` is invoked when readline emits its `'close'` event — caused
+   * by either stdin EOF (parent process exited) or an in-process
+   * `rl.close()` via `stop()`. Defaults to `process.exit(0)` for
+   * standalone usage; MCPServer overrides it so shutdown flows through
+   * its drain coordinator before exiting.
    */
-  start(handler: MessageHandler): void {
+  start(handler: MessageHandler, onClose?: () => void): void {
     this.messageHandler = handler;
+    if (onClose) this.onClose = onClose;
 
     this.rl = readline.createInterface({
       input: process.stdin,
@@ -88,7 +102,7 @@ export class StdioTransport {
     });
 
     this.rl.on('close', () => {
-      process.exit(0);
+      this.onClose();
     });
   }
 
