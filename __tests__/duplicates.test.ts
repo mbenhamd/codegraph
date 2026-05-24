@@ -420,6 +420,78 @@ describe('PF-692: findDuplicates', () => {
     expect(exact!.coveredByExactGroup).toBe(false);
   });
 
+  it('distinguishes "unfingerprintable kinds" from "needs re-index" (Codex PR review P2)', () => {
+    // DB has fingerprints for `function` but the user asks for
+    // `component` — error should say "kinds aren't fingerprinted",
+    // NOT "re-run codegraph index".
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite') as {
+      DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void };
+    };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-dup-kindgap-'));
+    const dbPath = path.join(dir, 'kindgap.db');
+    try {
+      const db = new DatabaseSync(dbPath);
+      db.exec(`CREATE TABLE nodes(
+        id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT,
+        file_path TEXT, language TEXT,
+        start_line INT, end_line INT, start_column INT, end_column INT,
+        signature TEXT, ast_hash TEXT, ast_shape_hash TEXT,
+        sig_hash TEXT, call_pattern_hash TEXT)`);
+      // A function WITH fingerprint, and a component WITHOUT.
+      db.exec(
+        `INSERT INTO nodes VALUES('f1', 'function', 'fn', 'a::fn', 'a.ts', 'typescript',
+          1, 15, 0, 0, NULL, 'hash-real', 'shape-real', NULL, NULL)`,
+      );
+      db.exec(
+        `INSERT INTO nodes VALUES('f2', 'function', 'fn2', 'b::fn', 'b.ts', 'typescript',
+          1, 15, 0, 0, NULL, 'hash-real', 'shape-real', NULL, NULL)`,
+      );
+      db.exec(
+        `INSERT INTO nodes VALUES('c1', 'component', 'Btn', 'Btn', 'Btn.vue', 'vue',
+          1, 15, 0, 0, NULL, NULL, NULL, NULL, NULL)`,
+      );
+      db.exec(
+        `INSERT INTO nodes VALUES('c2', 'component', 'Card', 'Card', 'Card.vue', 'vue',
+          1, 15, 0, 0, NULL, NULL, NULL, NULL, NULL)`,
+      );
+      db.close();
+      // Asking for `component` → "not fingerprinted" error.
+      expect(() => findDuplicates(dbPath, { kinds: ['component'] })).toThrow(
+        /aren't fingerprinted|framework-extractor/i,
+      );
+      // Asking for `function` → works fine (1 exact group: f1, f2).
+      const ok = findDuplicates(dbPath, { kinds: ['function'] });
+      expect(ok.summary.exactGroups).toBe(1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not double-count shape-group members that are also in exact groups (Codex PR review P2)', async () => {
+    // {A.f, B.f} are an exact group (Type-1, count=2).
+    // {A.f, B.f, C.g} share ast_shape_hash (Type-2, count=3) but
+    // C.g has a different ast_hash. The shape group is retained
+    // because its member set isn't equal to the exact group's.
+    // shapeNodes must count ONLY C.g (the shape-only member), not
+    // all 3 — otherwise A.f and B.f are counted twice in the
+    // totals (once in exactNodes, once in shapeNodes).
+    fixture = await makeProject({
+      'src/a.ts': `export function f(x: number): number ${LARGE_BODY}\n`,
+      'src/b.ts': `export function f(x: number): number ${LARGE_BODY}\n`,
+      'src/c.ts': `export function g(x: number): number ${LARGE_BODY}\n`,
+    });
+    const result = findDuplicates(fixture.dbPath);
+    const exact = result.groups.find((g) => g.kind === 'exact');
+    const shape = result.groups.find((g) => g.kind === 'shape');
+    if (!shape) return; // fixture variant
+    // shapeNodes should reflect ONLY the shape-only members
+    // (i.e. C.g) — exactly one, not three.
+    const exactMemberIds = new Set(exact!.members.map((m) => m.id));
+    const shapeOnly = shape.members.filter((m) => !exactMemberIds.has(m.id));
+    expect(result.summary.shapeNodes).toBe(shapeOnly.length);
+  });
+
   it('exposes fingerprintCoverage in summary', async () => {
     fixture = await makeProject({
       'src/a.ts': `export function fa(x: number): number ${LARGE_BODY}\n`,

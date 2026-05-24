@@ -215,19 +215,52 @@ function fingerprintCoverage(
   };
 }
 
-function assertFingerprintCoverage(cov: FingerprintCoverageRow): void {
+/**
+ * Returns true when ANY node anywhere in the DB has an ast_hash —
+ * lets us distinguish "DB needs re-indexing" (no fingerprints
+ * anywhere) from "user requested unfingerprintable kinds" (some
+ * fingerprints exist, just not for the requested kinds). Codex PR
+ * review P2 fix.
+ */
+function dbHasAnyFingerprint(db: SqliteReadOnly): boolean {
+  const row = db
+    .prepare(`SELECT 1 AS has FROM nodes WHERE ast_hash IS NOT NULL LIMIT 1`)
+    .get() as { has?: number } | undefined;
+  return !!row;
+}
+
+function assertFingerprintCoverage(
+  db: SqliteReadOnly,
+  kinds: ReadonlyArray<string>,
+  cov: FingerprintCoverageRow,
+): void {
   if (cov.eligible === 0) {
     // No nodes match the kind+min-lines filter at all. Different
     // condition from a missing fingerprint — just return empty.
     return;
   }
-  if (cov.withAstHash === 0) {
+  if (cov.withAstHash > 0) return;
+
+  // Zero fingerprinted nodes among the requested kinds. Distinguish
+  // two cases: (1) DB has fingerprints SOMEWHERE — user asked for a
+  // kind that isn't fingerprinted (framework-extractor nodes don't
+  // go through `createNode`'s hash path); (2) DB has zero
+  // fingerprints anywhere — likely migrated-not-reindexed.
+  if (dbHasAnyFingerprint(db)) {
     throw new Error(
-      `duplicates: 0 of ${cov.eligible} eligible nodes have fingerprints. ` +
-        `This usually means the DB was migrated to v6 but not re-indexed. ` +
-        `Run \`codegraph index\` to refresh fingerprints.`,
+      `duplicates: 0 of ${cov.eligible} eligible nodes for kinds=${kinds.join(',')} ` +
+        `have fingerprints, but this DB does have fingerprints for OTHER kinds. ` +
+        `The requested kinds aren't fingerprinted (e.g., framework-extractor ` +
+        `nodes like 'component'/'route' are emitted without tree-sitter hashing). ` +
+        `Try --kind=function,method.`,
     );
   }
+  throw new Error(
+    `duplicates: 0 of ${cov.eligible} eligible nodes have fingerprints, ` +
+      `and this DB has NO fingerprinted nodes at all. ` +
+      `This usually means the DB was migrated to v6 but not re-indexed. ` +
+      `Run \`codegraph index\` to refresh fingerprints.`,
+  );
 }
 
 function rowToMember(r: NodeRow): DuplicateMember {
@@ -396,7 +429,7 @@ export function findDuplicates(
   try {
     assertSchemaSupportsFingerprints(db);
     const coverage = fingerprintCoverage(db, kinds, minLines);
-    assertFingerprintCoverage(coverage);
+    assertFingerprintCoverage(db, kinds, coverage);
 
     const exact = loadGroups(db, 'ast_hash', kinds, minLines);
     const shapeRaw = loadGroups(db, 'ast_shape_hash', kinds, minLines);
@@ -433,7 +466,14 @@ export function findDuplicates(
         fileCount: distinctFileCount(members),
         coveredByExactGroup: anyMemberIsExact,
       });
-      shapeNodes += members.length;
+      // Count ONLY shape-ONLY members (those not already covered
+      // by an exact group). Otherwise shape-superset cases like
+      // {A.f exact, B.f exact, A.g shape} would inflate
+      // `shapeNodes` by re-counting A.f + B.f (Codex PR review P2
+      // double-counting fix).
+      for (const m of members) {
+        if (!idsInExactGroup.has(m.id)) shapeNodes++;
+      }
     }
     groups.sort(compareGroups);
 
