@@ -520,6 +520,22 @@ export interface BuildContextOptions {
    * a follow-up slice; this flag pins the opt-in surface for them.
    */
   diagnostics?: boolean;
+
+  /**
+   * PF-609 follow-up: restrict context to project-relative file path
+   * prefixes or glob-ish patterns (`*` single segment, `**` any depth,
+   * trailing `/` = directory prefix). Applied BEFORE code-block
+   * extraction and entry-point selection so the entire context is
+   * scoped, not just the rendered output.
+   */
+  path?: string[];
+
+  /**
+   * PF-609 follow-up: drop context entries whose file path matches any
+   * of these patterns. Combine with `path` to scope to one package
+   * while excluding tests/vendor inside it.
+   */
+  excludePath?: string[];
 }
 
 /**

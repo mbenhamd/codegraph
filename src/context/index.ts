@@ -25,6 +25,7 @@ import { GraphTraverser } from '../graph';
 import { formatContextAsMarkdown, formatContextAsJson } from './formatter';
 import { logDebug } from '../errors';
 import { validatePathWithinRoot } from '../utils';
+import { PathFilter } from '../path-filter';
 import {
   isTestFile,
   extractSearchTerms,
@@ -155,6 +156,8 @@ const DEFAULT_BUILD_OPTIONS: Required<BuildContextOptions> = {
   traversalDepth: 1,      // Reduced from 2 - shallower graph expansion
   minScore: 0.3,
   diagnostics: false,     // PF-618: opt-in ranking diagnostics
+  path: [],               // PF-609b: include filter (empty = unrestricted)
+  excludePath: [],        // PF-609b: exclude filter
 };
 
 /**
@@ -230,6 +233,26 @@ export class ContextBuilder {
       maxNodes: opts.maxNodes,
       minScore: opts.minScore,
     });
+
+    // PF-609b: scope nodes and edges by path / excludePath before code
+    // extraction, entry-point selection, and ranking diagnostics. The
+    // filter is applied at the subgraph level so EVERY downstream
+    // step (entry points, code blocks, related files, diagnostics)
+    // sees the same scoped set — keeping the output coherent rather
+    // than just hiding nodes after ranking.
+    if ((opts.path?.length ?? 0) > 0 || (opts.excludePath?.length ?? 0) > 0) {
+      const pathFilter = new PathFilter({ path: opts.path, excludePath: opts.excludePath });
+      for (const [id, node] of subgraph.nodes) {
+        if (!pathFilter.matches(node.filePath)) {
+          subgraph.nodes.delete(id);
+        }
+      }
+      // Drop edges whose endpoints are now out of scope.
+      subgraph.edges = subgraph.edges.filter(
+        (e) => subgraph.nodes.has(e.source) && subgraph.nodes.has(e.target),
+      );
+      subgraph.roots = subgraph.roots.filter((id) => subgraph.nodes.has(id));
+    }
 
     // Get entry points (nodes from semantic search)
     const entryPoints = this.getEntryPoints(subgraph);

@@ -388,6 +388,8 @@ export const tools: ToolDefinition[] = [
           default: false,
         },
         projectPath: projectPathProperty,
+        path: pathFilterProperty,
+        excludePath: excludePathFilterProperty,
       },
       required: ['task'],
     },
@@ -494,6 +496,8 @@ export const tools: ToolDefinition[] = [
           default: 12,
         },
         projectPath: projectPathProperty,
+        path: pathFilterProperty,
+        excludePath: excludePathFilterProperty,
       },
       required: ['query'],
     },
@@ -878,12 +882,15 @@ export class ToolHandler {
     const maxNodes = (args.maxNodes as number) || 20;
     const includeCode = args.includeCode !== false;
     const diagnostics = args.diagnostics === true;
+    const pathOpts = parsePathFilterArgs(args);
 
     const context = await cg.buildContext(task, {
       maxNodes,
       includeCode,
       diagnostics,
       format: 'markdown',
+      ...(pathOpts.path ? { path: [...pathOpts.path] } : {}),
+      ...(pathOpts.excludePath ? { excludePath: [...pathOpts.excludePath] } : {}),
     });
 
     // Detect if this looks like a feature request (vs bug fix or exploration)
@@ -1109,8 +1116,27 @@ export class ToolHandler {
       minScore: 0.2,
     });
 
+    // PF-609b: scope explore by path / excludePath BEFORE the file
+    // grouping / scoring step. Matches the placement-before-ranking
+    // requirement Codex called out: filtered nodes never enter the
+    // file-group scoring loop, so what users see is genuinely scoped
+    // rather than scored-then-hidden.
+    const explorePathFilter = new PathFilter(parsePathFilterArgs(args));
+    if (!explorePathFilter.isOpen()) {
+      for (const [id, node] of subgraph.nodes) {
+        if (!explorePathFilter.matches(node.filePath)) {
+          subgraph.nodes.delete(id);
+        }
+      }
+      subgraph.edges = subgraph.edges.filter(
+        (e) => subgraph.nodes.has(e.source) && subgraph.nodes.has(e.target),
+      );
+      subgraph.roots = subgraph.roots.filter((id) => subgraph.nodes.has(id));
+    }
+
     if (subgraph.nodes.size === 0) {
-      return this.textResult(`No relevant code found for "${query}"`);
+      const scopeNote = explorePathFilter.isOpen() ? '' : ' (within configured path filter)';
+      return this.textResult(`No relevant code found for "${query}"${scopeNote}`);
     }
 
     // Step 2: Group nodes by file, score by relevance
