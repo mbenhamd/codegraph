@@ -631,6 +631,28 @@ export const tools: ToolDefinition[] = [
     },
   },
   {
+    name: 'codegraph_css_selectors',
+    description:
+      'Find CSS selectors (PF-695 — Phase A of the UI/UX retrieval lane). Returns selector nodes — every comma-separated entry in a CSS / SCSS / LESS rule becomes one node — whose name or qualifiedName contains the supplied pattern. Each result shows the selector text, file:line where it\'s defined, and the rule body preview. Use when answering "where is `.feature-card__title` defined", "which CSS files declare `:hover` rules", or "find every selector in `tokens.css`". **Scope note**: this returns DEFINITIONS, not usages. JSX `className` consumers come in Phase B; design tokens in Phase C; selector-kind filtering (class/id/pseudo/...) waits for Phase B when the metadata gets a proper column.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pattern: {
+          type: 'string',
+          description:
+            'Substring or class name to match (e.g. `.feature-card`, `:hover`, `tokens`). Case-sensitive substring match against the selector text and `file.css::selector` qualifiedName.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum selectors to return (default 50, max 500).',
+          default: 50,
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['pattern'],
+    },
+  },
+  {
     name: 'codegraph_explain',
     description:
       'Surface a single edge\'s persisted resolver provenance (PF-693). Answers "WHY does CodeGraph think this call resolves here?" by showing extractor (tree-sitter/scip/heuristic), resolver strategy (import/framework/qualified-name/exact-match/instance-method/file-path/fuzzy), confidence, raw metadata, and source/target node details. **Honest scope**: `traceAvailable: false` is locked at false today — the resolver discards loser strategy attempts; only the winner\'s tag survives. This surfaces breadcrumbs, not a causal explanation. Round-trip: get `edgeId` (or full `edge` identity) from `codegraph_callers`/`codegraph_callees` JSON output, pass it here.',
@@ -981,6 +1003,8 @@ export class ToolHandler {
           return await this.handleDuplicates(args);
         case 'codegraph_explain':
           return await this.handleExplain(args);
+        case 'codegraph_css_selectors':
+          return await this.handleCssSelectors(args);
         default:
           return this.errorResult(`Unknown tool: ${toolName}`);
       }
@@ -2696,6 +2720,69 @@ export class ToolHandler {
     }
 
     return lines.join('\n');
+  }
+
+  /**
+   * Handle codegraph_css_selectors — PF-695 Phase A. Queries the
+   * indexed `selector`-kind nodes (emitted by `CSSExtractor`) by
+   * substring match on name. Bypasses `searchNodes` because the
+   * existing FTS5 path is tuned for code-symbol search (kind weighting,
+   * exact-match boost) and would treat `.feature-card` as a
+   * fragmented multi-token query. A direct SQL LIKE keeps the lookup
+   * semantics aligned with what users intend when they type a
+   * selector pattern.
+   */
+  private async handleCssSelectors(args: Record<string, unknown>): Promise<ToolResult> {
+    const pattern = this.validateString(args.pattern, 'pattern');
+    if (typeof pattern !== 'string') return pattern;
+
+    const limit = clamp(Number(args.limit) || 50, 1, 500);
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+
+    // Use the public `getNodesByKind` accessor and filter in memory.
+    // Selector counts in real repos are far smaller than total node
+    // counts, so this is fine; if selector volume grows past tens of
+    // thousands per project, add a dedicated `searchSelectors` method
+    // to QueryBuilder.
+    const allSelectors = cg.getNodesByKind('selector');
+    const matching = allSelectors.filter(
+      (n) => n.name.includes(pattern) || n.qualifiedName.includes(pattern),
+    );
+
+    const rows = matching.slice(0, limit).map((n) => ({
+      name: n.name,
+      file_path: n.filePath,
+      start_line: n.startLine,
+      signature: n.signature ?? null,
+    }));
+
+    if (rows.length === 0) {
+      return this.textResult(`No CSS selectors found matching \`${pattern}\`.`);
+    }
+
+    const lines: string[] = [
+      `## CSS selectors matching \`${pattern}\``,
+      '',
+      `Found **${rows.length}** selector definition(s):`,
+      '',
+    ];
+
+    for (const r of rows) {
+      lines.push(`- \`${r.name}\` — ${r.file_path}:${r.start_line}`);
+      if (r.signature && r.signature !== r.name) {
+        // Trim signature for compactness — the extractor already capped
+        // at ~400 chars but markdown lists look cleaner with less.
+        const sig = r.signature.length > 120 ? r.signature.slice(0, 120) + '…' : r.signature;
+        lines.push(`  ${sig}`);
+      }
+    }
+
+    if (rows.length === limit) {
+      lines.push('');
+      lines.push(`> Truncated at \`limit=${limit}\`. Narrow the pattern or raise the limit for more.`);
+    }
+
+    return this.textResult(this.truncateOutput(lines.join('\n')));
   }
 
   private formatNodeDetails(node: Node, code: string | null, outline?: string | null): string {

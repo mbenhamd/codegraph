@@ -94,8 +94,10 @@ describe('Language Detection', () => {
   });
 
   it('should return unknown for unsupported extensions', () => {
-    expect(detectLanguage('styles.css')).toBe('unknown');
+    // PF-695: `.css` is now supported. Use a genuinely-unsupported
+    // extension instead.
     expect(detectLanguage('data.json')).toBe('unknown');
+    expect(detectLanguage('archive.tar.gz')).toBe('unknown');
   });
 });
 
