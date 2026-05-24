@@ -261,4 +261,22 @@ describe('MCP graph tools: path/excludePath integration (PF-609)', () => {
     expect(noFilter).toMatch(/util/);
     expect(noFilter.length).toBeGreaterThan(50);
   });
+
+  // PF-618 follow-up — diagnostics on codegraph_explore.
+  it('codegraph_explore omits ranking diagnostics by default (PF-618 follow-up)', async () => {
+    await setupMonorepo();
+    const out = await callTool('codegraph_explore', { query: 'util handler page' });
+    expect(out).not.toMatch(/### Ranking Diagnostics/);
+  });
+
+  it('codegraph_explore emits Ranking Diagnostics when diagnostics:true (PF-618 follow-up)', async () => {
+    await setupMonorepo();
+    const out = await callTool('codegraph_explore', {
+      query: 'util handler page',
+      diagnostics: true,
+    });
+    expect(out).toMatch(/### Ranking Diagnostics/);
+    // The block lists per-file structural-score breakdowns.
+    expect(out).toMatch(/structural score \d+ \(/);
+  });
 });
