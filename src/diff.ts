@@ -2,8 +2,8 @@
  * PF-691: DB-vs-DB diff primitive.
  *
  * Compares two `.codegraph/codegraph.db` files and reports
- * structural deltas at the node + edge level. Designed as a
- * primitive that other tools (codegraph_duplicates,
+ * structural deltas at the file, node, and edge level. Designed
+ * as a primitive that other tools (codegraph_duplicates,
  * codegraph_explain, drift-detection downstream consumers) can
  * call, and exposed as the `codegraph diff` CLI subcommand.
  *
@@ -13,23 +13,34 @@
  * checkout` from a graph index tool would be destructive and
  * unsafe — agy called the alternative "a massive anti-pattern".
  *
- * Output shape: added / removed / changed for both nodes and
- * edges. For changed nodes, the `changedFields` array lists which
- * specific fields differ — `astHash`, `sigHash`, `signature`,
- * `qualifiedName`, etc. Downstream drift tools key off these
- * field names to classify the kind of drift (body change vs
- * contract change vs rename).
+ * Output shape: added / removed / changed for files, nodes, and
+ * edges. For changed nodes, `changedFields` lists which tracked
+ * fields differ; for changed edges, `changedFields` lists which
+ * of metadata/provenance differ (PR #39 round 3 closure on the
+ * "edge-metadata-not-compared" gap).
  *
  * Nodes are matched by `id` across the two databases — IDs are
- * deterministic functions of `filePath + qualifiedName + line`
- * per `generateNodeId`, so a node that didn't move retains the
- * same ID across reindexes. Renames or file moves naturally
- * surface as "removed in old" + "added in new" pairs.
+ * deterministic functions of `filePath + kind + name + line` per
+ * `generateNodeId`. Note: line-sensitive matching means a
+ * prepended file header shifts every node ID and produces mass
+ * remove/add churn rather than `changedNodes`. This is a
+ * pre-existing CodeGraph design decision (not introduced here);
+ * downstream consumers wanting move-stable matching should diff
+ * by `(filePath, qualifiedName)` after consuming this output.
  *
  * Edges are matched by canonical identity `(source, target, kind,
  * line, col)` per the PR #17 UNIQUE INDEX. Auto-incrementing
  * edge IDs are NOT used for matching — those are per-DB
  * artifacts.
+ *
+ * Fingerprint coverage caveat: only tree-sitter-extracted nodes
+ * carry `ast_hash`/`ast_shape_hash`/`sig_hash`. Liquid, Vue,
+ * Svelte, and YAML/Drupal extractors emit nodes with NULL
+ * fingerprints, so body-only changes inside those file types
+ * won't surface in `changedNodes`. The diff output includes a
+ * `fingerprintCoverage` field so consumers can detect when their
+ * DB has gaps and treat the diff as fingerprint-blind for those
+ * rows.
  */
 
 import * as fs from 'fs';
@@ -108,19 +119,60 @@ export interface NodeSnapshot {
 /**
  * Canonical edge identity per PR #17 UNIQUE INDEX. Used as the
  * Map key when matching edges across databases. NULL line/col
- * collapse to a single bucket via `COALESCE(line, -1)` semantics
- * so file-level imports + synthesized re-export edges match
- * cleanly.
+ * folded to a single bucket for matching, but the public output
+ * preserves `null` semantics (PR #39 round 3 NITPICK fix).
  */
 export interface EdgeIdentity {
   source: string;
   target: string;
   kind: string;
-  line: number; // -1 when NULL
-  col: number; // -1 when NULL
+  line: number | null;
+  col: number | null;
+}
+
+/**
+ * Edge change record — same canonical identity as `EdgeIdentity`
+ * plus `changedFields` listing which of `metadata` / `provenance`
+ * differs between the two rows. PR #39 round 3 added this when
+ * Codex flagged that two DBs could differ in resolver provenance
+ * (used by `codegraph explain`) and the diff would report
+ * nothing.
+ */
+export interface EdgeChange extends EdgeIdentity {
+  changedFields: string[];
+  old: { metadata: Record<string, unknown> | null; provenance: string | null };
+  new: { metadata: Record<string, unknown> | null; provenance: string | null };
+}
+
+/**
+ * File-level change record. Covers add/remove/content-change at
+ * the file granularity — important because adding a file with
+ * zero indexed symbols (e.g., a `.json` config) would produce
+ * empty node/edge deltas otherwise (PR #39 round 3 BLOCKER fix).
+ */
+export interface FileChange {
+  path: string;
+  language: string;
+  contentHash?: string;
+  size?: number;
+  nodeCount?: number;
+}
+
+export interface FileContentChange {
+  path: string;
+  language: string;
+  changedFields: string[];
+  old: { contentHash: string; size: number; nodeCount: number };
+  new: { contentHash: string; size: number; nodeCount: number };
 }
 
 export interface DiffResult {
+  /** Files present in new DB but not in old. */
+  addedFiles: FileChange[];
+  /** Files present in old DB but not in new. */
+  removedFiles: FileChange[];
+  /** Files in both DBs whose content_hash / size / node_count differ. */
+  changedFiles: FileContentChange[];
   /** Nodes present in new DB but not in old DB (by node ID). */
   addedNodes: NodeSnapshot[];
   /** Nodes present in old DB but not in new DB (by node ID). */
@@ -132,14 +184,30 @@ export interface DiffResult {
   addedEdges: EdgeIdentity[];
   /** Edges present in old DB but not in new DB. */
   removedEdges: EdgeIdentity[];
+  /** Edges in both DBs whose `metadata` or `provenance` differ. */
+  changedEdges: EdgeChange[];
   /** Summary counts so consumers can render a quick header without
    *  walking the arrays. */
   summary: {
+    addedFiles: number;
+    removedFiles: number;
+    changedFiles: number;
     addedNodes: number;
     removedNodes: number;
     changedNodes: number;
     addedEdges: number;
     removedEdges: number;
+    changedEdges: number;
+  };
+  /**
+   * Fingerprint coverage on each side, so consumers can tell
+   * whether body-level changes for synthesized-extractor file
+   * types (Liquid/Vue/Svelte/YAML) might be silently absent from
+   * `changedNodes`. `nodesWithAstHash / totalNodes` per DB.
+   */
+  fingerprintCoverage: {
+    old: { totalNodes: number; nodesWithAstHash: number };
+    new: { totalNodes: number; nodesWithAstHash: number };
   };
 }
 
@@ -188,11 +256,21 @@ function nodeChangedFields(oldN: Node, newN: Node): string[] {
   return changed;
 }
 
-function edgeIdentityKey(e: EdgeIdentity): string {
-  return `${e.source}\x1f${e.target}\x1f${e.kind}\x1f${e.line}\x1f${e.col}`;
+/**
+ * Sentinel used INSIDE the Map key so NULL line/col fold to a
+ * single bucket matching the PF-625 UNIQUE INDEX. Never leaks
+ * into the public output — `edgeIdentityForOutput` translates
+ * back to `null`.
+ */
+const NULL_SENTINEL = -1;
+
+function edgeIdentityKey(row: { source: string; target: string; kind: string; line: number | null; col: number | null }): string {
+  const line = row.line ?? NULL_SENTINEL;
+  const col = row.col ?? NULL_SENTINEL;
+  return `${row.source}\x1f${row.target}\x1f${row.kind}\x1f${line}\x1f${col}`;
 }
 
-function edgeRowToIdentity(row: {
+function edgeIdentityForOutput(row: {
   source: string;
   target: string;
   kind: string;
@@ -203,9 +281,32 @@ function edgeRowToIdentity(row: {
     source: row.source,
     target: row.target,
     kind: row.kind,
-    line: row.line ?? -1,
-    col: row.col ?? -1,
+    line: row.line,
+    col: row.col,
   };
+}
+
+interface EdgeRow {
+  source: string;
+  target: string;
+  kind: string;
+  line: number | null;
+  col: number | null;
+  metadata: string | null;
+  provenance: string | null;
+}
+
+function parseMetadata(raw: string | null): Record<string, unknown> | null {
+  if (raw === null || raw === undefined) return null;
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      return v as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -223,9 +324,10 @@ function edgeRowToIdentity(row: {
  * creation entirely — diffing a DB leaves the directory bit-for-
  * bit unchanged.
  *
- * The file existence check is explicit so the error string stays
- * `not found` (the diff test relies on this) regardless of
- * whatever lower-level SQLite error a missing path would produce.
+ * Wraps SQLite-level errors so a random text file with a `.db`
+ * extension produces a "not a valid SQLite database" message
+ * instead of the raw SQLITE_NOTADB error (PR #39 round 3 REVIEW
+ * fix).
  */
 function openReadOnly(dbPath: string): SqliteReadOnly {
   if (!fs.existsSync(dbPath)) {
@@ -238,7 +340,18 @@ function openReadOnly(dbPath: string): SqliteReadOnly {
   // don't contain these characters, but defending the URI parser
   // is cheaper than guessing.
   const escaped = dbPath.replace(/%/g, '%25').replace(/\?/g, '%3F').replace(/#/g, '%23');
-  return new DatabaseSync(`file:${escaped}?immutable=1`, { readOnly: true });
+  try {
+    const db = new DatabaseSync(`file:${escaped}?immutable=1`, { readOnly: true });
+    // node:sqlite opens lazily — a non-SQLite file only errors when
+    // the first statement runs. Force that here so the "Invalid
+    // CodeGraph database" wrap is the surface error rather than
+    // a raw "file is not a database" leaking out of deep query code.
+    db.prepare('SELECT 1').get();
+    return db;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid CodeGraph database at ${dbPath}: ${msg}`);
+  }
 }
 
 /**
@@ -282,8 +395,8 @@ function loadNodes(db: SqliteReadOnly): Map<string, Node> {
       language: r.language as Node['language'],
       startLine: r.start_line as number,
       endLine: r.end_line as number,
-      startColumn: r.start_column as number,
-      endColumn: r.end_column as number,
+      startColumn: (r.start_column as number | null) ?? 0,
+      endColumn: (r.end_column as number | null) ?? 0,
       signature: (r.signature as string | null) ?? undefined,
       astHash: r.ast_hash as string | null,
       astShapeHash: r.ast_shape_hash as string | null,
@@ -295,20 +408,88 @@ function loadNodes(db: SqliteReadOnly): Map<string, Node> {
   return out;
 }
 
-function loadEdgeIdentities(db: SqliteReadOnly): Map<string, EdgeIdentity> {
-  const rows = db.prepare('SELECT source, target, kind, line, col FROM edges').all() as Array<{
+/**
+ * Load full edge rows (not just identities) so the matched-edge
+ * comparison path can detect `metadata` / `provenance` drift.
+ * Keyed by canonical-identity string so `changedEdges` can pair
+ * old and new rows by the same shape as added/removed.
+ */
+function loadEdges(db: SqliteReadOnly): Map<string, EdgeRow> {
+  const rows = db
+    .prepare('SELECT source, target, kind, line, col, metadata, provenance FROM edges')
+    .all() as Array<{
     source: string;
     target: string;
     kind: string;
     line: number | null;
     col: number | null;
+    metadata: string | null;
+    provenance: string | null;
   }>;
-  const out = new Map<string, EdgeIdentity>();
+  const out = new Map<string, EdgeRow>();
   for (const r of rows) {
-    const id = edgeRowToIdentity(r);
-    out.set(edgeIdentityKey(id), id);
+    out.set(edgeIdentityKey(r), r);
   }
   return out;
+}
+
+interface FileRow {
+  path: string;
+  content_hash: string;
+  language: string;
+  size: number;
+  node_count: number;
+}
+
+function loadFiles(db: SqliteReadOnly): Map<string, FileRow> {
+  const rows = db
+    .prepare('SELECT path, content_hash, language, size, node_count FROM files')
+    .all() as FileRow[];
+  const out = new Map<string, FileRow>();
+  for (const r of rows) out.set(r.path, r);
+  return out;
+}
+
+function fileSnapshot(r: FileRow): FileChange {
+  return {
+    path: r.path,
+    language: r.language,
+    contentHash: r.content_hash,
+    size: r.size,
+    nodeCount: r.node_count,
+  };
+}
+
+function countFingerprintCoverage(nodes: Map<string, Node>): { totalNodes: number; nodesWithAstHash: number } {
+  let withHash = 0;
+  for (const n of nodes.values()) {
+    if (n.astHash) withHash++;
+  }
+  return { totalNodes: nodes.size, nodesWithAstHash: withHash };
+}
+
+/**
+ * Stable string form for `metadata` / `provenance` comparison.
+ * Re-serializes parsed metadata so semantically-identical JSON
+ * with different key order or whitespace compares equal.
+ */
+function metadataKey(metadata: Record<string, unknown> | null): string {
+  if (metadata === null) return '';
+  const keys = Object.keys(metadata).sort();
+  const sorted: Record<string, unknown> = {};
+  for (const k of keys) sorted[k] = metadata[k];
+  return JSON.stringify(sorted);
+}
+
+function edgeChangedFields(oldRow: EdgeRow, newRow: EdgeRow): string[] {
+  const changed: string[] = [];
+  if (metadataKey(parseMetadata(oldRow.metadata)) !== metadataKey(parseMetadata(newRow.metadata))) {
+    changed.push('metadata');
+  }
+  if ((oldRow.provenance ?? null) !== (newRow.provenance ?? null)) {
+    changed.push('provenance');
+  }
+  return changed;
 }
 
 /**
@@ -356,29 +537,84 @@ export function diffDatabases(oldDbPath: string, newDbPath: string): DiffResult 
       }
     }
 
-    const oldEdges = loadEdgeIdentities(oldDb);
-    const newEdges = loadEdgeIdentities(newDb);
+    const oldEdges = loadEdges(oldDb);
+    const newEdges = loadEdges(newDb);
     const addedEdges: EdgeIdentity[] = [];
     const removedEdges: EdgeIdentity[] = [];
+    const changedEdges: EdgeChange[] = [];
     for (const [key, e] of newEdges) {
-      if (!oldEdges.has(key)) addedEdges.push(e);
+      const oldRow = oldEdges.get(key);
+      if (!oldRow) {
+        addedEdges.push(edgeIdentityForOutput(e));
+        continue;
+      }
+      const fields = edgeChangedFields(oldRow, e);
+      if (fields.length > 0) {
+        changedEdges.push({
+          ...edgeIdentityForOutput(e),
+          changedFields: fields,
+          old: { metadata: parseMetadata(oldRow.metadata), provenance: oldRow.provenance },
+          new: { metadata: parseMetadata(e.metadata), provenance: e.provenance },
+        });
+      }
     }
     for (const [key, e] of oldEdges) {
-      if (!newEdges.has(key)) removedEdges.push(e);
+      if (!newEdges.has(key)) removedEdges.push(edgeIdentityForOutput(e));
+    }
+
+    const oldFiles = loadFiles(oldDb);
+    const newFiles = loadFiles(newDb);
+    const addedFiles: FileChange[] = [];
+    const removedFiles: FileChange[] = [];
+    const changedFiles: FileContentChange[] = [];
+    for (const [path, f] of newFiles) {
+      const oldF = oldFiles.get(path);
+      if (!oldF) {
+        addedFiles.push(fileSnapshot(f));
+        continue;
+      }
+      const fields: string[] = [];
+      if (oldF.content_hash !== f.content_hash) fields.push('contentHash');
+      if (oldF.size !== f.size) fields.push('size');
+      if (oldF.node_count !== f.node_count) fields.push('nodeCount');
+      if (fields.length > 0) {
+        changedFiles.push({
+          path,
+          language: f.language,
+          changedFields: fields,
+          old: { contentHash: oldF.content_hash, size: oldF.size, nodeCount: oldF.node_count },
+          new: { contentHash: f.content_hash, size: f.size, nodeCount: f.node_count },
+        });
+      }
+    }
+    for (const [path, f] of oldFiles) {
+      if (!newFiles.has(path)) removedFiles.push(fileSnapshot(f));
     }
 
     return {
+      addedFiles,
+      removedFiles,
+      changedFiles,
       addedNodes,
       removedNodes,
       changedNodes,
       addedEdges,
       removedEdges,
+      changedEdges,
       summary: {
+        addedFiles: addedFiles.length,
+        removedFiles: removedFiles.length,
+        changedFiles: changedFiles.length,
         addedNodes: addedNodes.length,
         removedNodes: removedNodes.length,
         changedNodes: changedNodes.length,
         addedEdges: addedEdges.length,
         removedEdges: removedEdges.length,
+        changedEdges: changedEdges.length,
+      },
+      fingerprintCoverage: {
+        old: countFingerprintCoverage(oldNodes),
+        new: countFingerprintCoverage(newNodes),
       },
     };
   } finally {

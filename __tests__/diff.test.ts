@@ -222,10 +222,19 @@ describe('PF-691: diffDatabases', () => {
           start_line INT, end_line INT, start_column INT, end_column INT,
           signature TEXT)`);
         db.exec(`CREATE TABLE edges(
-          id INTEGER PRIMARY KEY, source TEXT, target TEXT, kind TEXT, line INT, col INT)`);
+          id INTEGER PRIMARY KEY, source TEXT, target TEXT, kind TEXT,
+          metadata TEXT, line INT, col INT, provenance TEXT)`);
+        db.exec(`CREATE TABLE files(
+          path TEXT PRIMARY KEY, content_hash TEXT NOT NULL, language TEXT NOT NULL,
+          size INTEGER NOT NULL, modified_at INTEGER NOT NULL,
+          indexed_at INTEGER NOT NULL, node_count INTEGER DEFAULT 0,
+          errors TEXT)`);
         db.exec(
           `INSERT INTO nodes VALUES('${p}#1', 'function', '${qname.split('::').pop()}',` +
             ` '${qname}', 'src/a.ts', 'typescript', 1, 3, 0, 0, NULL)`,
+        );
+        db.exec(
+          `INSERT INTO files VALUES('src/a.ts', 'h${p}', 'typescript', 100, 0, 0, 1, NULL)`,
         );
         db.close();
       }
@@ -234,8 +243,147 @@ describe('PF-691: diffDatabases', () => {
       expect(result.summary.addedNodes).toBe(1);
       expect(result.summary.removedNodes).toBe(1);
       expect(result.summary.changedNodes).toBe(0);
+      // Both v5 DBs lack fingerprint columns → 0 nodes carry astHash.
+      expect(result.fingerprintCoverage.old.nodesWithAstHash).toBe(0);
+      expect(result.fingerprintCoverage.new.nodesWithAstHash).toBe(0);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('emits null (not -1 sentinel) for NULL line/col in edge identities', async () => {
+    // PR #39 round 3 NITPICK fix: the internal Map key uses -1 as a
+    // null-bucket sentinel (matches PF-625 UNIQUE INDEX semantics),
+    // but the public JSON output must preserve the original `null`.
+    oldP = await makeProject({
+      'src/a.ts': `export function add(a: number, b: number): number {\n  return a + b;\n}\n`,
+    });
+    newP = await makeProject({
+      'src/a.ts': `export function add(a: number, b: number): number {\n  return a + b;\n}\n` +
+        `export function sub(a: number, b: number): number { return a - b; }\n`,
+    });
+    const result = diffDatabases(oldP.dbPath, newP.dbPath);
+    // All edge identities (added/removed/changed) should have number-or-null
+    // line/col, never the internal -1 sentinel.
+    const allEdges = [...result.addedEdges, ...result.removedEdges];
+    for (const e of allEdges) {
+      expect(e.line === null || (typeof e.line === 'number' && e.line !== -1)).toBe(true);
+      expect(e.col === null || (typeof e.col === 'number' && e.col !== -1)).toBe(true);
+    }
+  });
+
+  it('reports added/removed/changed files via the files table', async () => {
+    // PR #39 round 3 BLOCKER fix: a file added/removed must surface
+    // at the file granularity even when its node count is 0.
+    oldP = await makeProject({
+      'src/a.ts': 'export function helper(): number { return 1; }\n',
+    });
+    newP = await makeProject({
+      'src/a.ts': 'export function helper(): number { return 2; }\n',
+      'src/b.ts': 'export function added(): number { return 3; }\n',
+    });
+    const result = diffDatabases(oldP.dbPath, newP.dbPath);
+    // b.ts → addedFiles, a.ts changed content (different body)
+    const addedPaths = result.addedFiles.map((f) => f.path).join(',');
+    expect(addedPaths).toMatch(/b\.ts/);
+    const changedPaths = result.changedFiles.map((f) => f.path).join(',');
+    expect(changedPaths).toMatch(/a\.ts/);
+    const aChange = result.changedFiles.find((f) => f.path.endsWith('a.ts'));
+    expect(aChange!.changedFields).toContain('contentHash');
+  });
+
+  it('reports changedEdges when resolver metadata or provenance drifts', () => {
+    // Hand-build two DBs with identical edge identity but different
+    // metadata to verify changedEdges fires on resolver drift
+    // (PR #39 round 3 REVIEW fix).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite') as {
+      DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void };
+    };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-diff-edgechange-'));
+    const oldDb = path.join(dir, 'old.db');
+    const newDb = path.join(dir, 'new.db');
+    try {
+      const buildSchema = (db: { exec(sql: string): void }) => {
+        db.exec(`CREATE TABLE nodes(
+          id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT,
+          file_path TEXT, language TEXT,
+          start_line INT, end_line INT, start_column INT, end_column INT,
+          signature TEXT, ast_hash TEXT, ast_shape_hash TEXT,
+          sig_hash TEXT, call_pattern_hash TEXT)`);
+        db.exec(`CREATE TABLE edges(
+          id INTEGER PRIMARY KEY, source TEXT, target TEXT, kind TEXT,
+          metadata TEXT, line INT, col INT, provenance TEXT)`);
+        db.exec(`CREATE TABLE files(
+          path TEXT PRIMARY KEY, content_hash TEXT NOT NULL, language TEXT NOT NULL,
+          size INTEGER NOT NULL, modified_at INTEGER NOT NULL,
+          indexed_at INTEGER NOT NULL, node_count INTEGER DEFAULT 0,
+          errors TEXT)`);
+        db.exec(
+          `INSERT INTO nodes VALUES('src-node', 'function', 'callerFn', 'src/a.ts::callerFn',
+            'src/a.ts', 'typescript', 1, 5, 0, 0, NULL, NULL, NULL, NULL, NULL)`,
+        );
+        db.exec(
+          `INSERT INTO nodes VALUES('tgt-node', 'function', 'targetFn', 'src/b.ts::targetFn',
+            'src/b.ts', 'typescript', 1, 3, 0, 0, NULL, NULL, NULL, NULL, NULL)`,
+        );
+      };
+
+      const dbOld = new DatabaseSync(oldDb);
+      buildSchema(dbOld);
+      dbOld.exec(
+        `INSERT INTO edges(source, target, kind, metadata, line, col, provenance)
+         VALUES('src-node', 'tgt-node', 'calls',
+                '{"resolvedBy":"fuzzy","confidence":0.3}', 2, 5, 'heuristic')`,
+      );
+      dbOld.close();
+
+      const dbNew = new DatabaseSync(newDb);
+      buildSchema(dbNew);
+      dbNew.exec(
+        `INSERT INTO edges(source, target, kind, metadata, line, col, provenance)
+         VALUES('src-node', 'tgt-node', 'calls',
+                '{"resolvedBy":"qualified-name","confidence":0.85}', 2, 5, 'tree-sitter')`,
+      );
+      dbNew.close();
+
+      const result = diffDatabases(oldDb, newDb);
+      expect(result.summary.addedEdges).toBe(0);
+      expect(result.summary.removedEdges).toBe(0);
+      expect(result.summary.changedEdges).toBe(1);
+      const ce = result.changedEdges[0];
+      expect(ce.changedFields).toContain('metadata');
+      expect(ce.changedFields).toContain('provenance');
+      expect(ce.old.provenance).toBe('heuristic');
+      expect(ce.new.provenance).toBe('tree-sitter');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('wraps non-SQLite file errors with friendly message', () => {
+    // PR #39 round 3 REVIEW fix: random `.db` file → invalid CodeGraph database.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-diff-corrupt-'));
+    const fakeDb = path.join(dir, 'fake.db');
+    try {
+      fs.writeFileSync(fakeDb, 'this is not a SQLite database\n');
+      expect(() => diffDatabases(fakeDb, fakeDb)).toThrow(/Invalid CodeGraph database/i);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('summary counts match every array length (including new fields)', async () => {
+    oldP = await makeProject({
+      'src/a.ts': 'export function one(): number { return 1; }\n',
+    });
+    newP = await makeProject({
+      'src/b.ts': 'export function two(): number { return 2; }\n',
+    });
+    const result = diffDatabases(oldP.dbPath, newP.dbPath);
+    expect(result.summary.addedFiles).toBe(result.addedFiles.length);
+    expect(result.summary.removedFiles).toBe(result.removedFiles.length);
+    expect(result.summary.changedFiles).toBe(result.changedFiles.length);
+    expect(result.summary.changedEdges).toBe(result.changedEdges.length);
   });
 });

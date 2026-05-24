@@ -22,6 +22,7 @@
  *   codegraph callees <symbol>   Find what a function/method calls
  *   codegraph impact <symbol>    Analyze what code is affected by changing a symbol
  *   codegraph affected [files]   Find test files affected by changes
+ *   codegraph diff <old> <new>   Structural diff between two indexed DBs
  */
 
 import { Command } from 'commander';
@@ -1180,16 +1181,47 @@ program
       console.log(chalk.cyan('New:'), newDbPath);
       console.log();
       console.log(chalk.bold('Summary:'));
+      console.log(`  Files added:     ${formatNumber(s.addedFiles)}`);
+      console.log(`  Files removed:   ${formatNumber(s.removedFiles)}`);
+      console.log(`  Files changed:   ${formatNumber(s.changedFiles)}`);
       console.log(`  Nodes added:     ${formatNumber(s.addedNodes)}`);
       console.log(`  Nodes removed:   ${formatNumber(s.removedNodes)}`);
       console.log(`  Nodes changed:   ${formatNumber(s.changedNodes)}`);
       console.log(`  Edges added:     ${formatNumber(s.addedEdges)}`);
       console.log(`  Edges removed:   ${formatNumber(s.removedEdges)}`);
+      console.log(`  Edges changed:   ${formatNumber(s.changedEdges)}`);
       console.log();
 
+      // Warn loudly when fingerprint coverage is partial — body-only
+      // changes inside Liquid/Vue/Svelte/YAML files will silently NOT
+      // show up in `changedNodes` because those extractors emit NULL
+      // fingerprints (Codex round 3 finding).
+      const cov = result.fingerprintCoverage;
+      const oldGap = cov.old.totalNodes - cov.old.nodesWithAstHash;
+      const newGap = cov.new.totalNodes - cov.new.nodesWithAstHash;
+      if (oldGap > 0 || newGap > 0) {
+        console.log(
+          chalk.yellow(
+            `Note: fingerprint coverage is partial. Body-level changes inside synthesized-extractor files (Liquid/Vue/Svelte/YAML) won't surface in changedNodes.`,
+          ),
+        );
+        console.log(
+          chalk.dim(
+            `  Old DB: ${cov.old.nodesWithAstHash}/${cov.old.totalNodes} nodes with fingerprints`,
+          ),
+        );
+        console.log(
+          chalk.dim(
+            `  New DB: ${cov.new.nodesWithAstHash}/${cov.new.totalNodes} nodes with fingerprints`,
+          ),
+        );
+        console.log();
+      }
+
       if (result.changedNodes.length > 0) {
-        console.log(chalk.bold('Changed nodes (first 20):'));
-        for (const c of result.changedNodes.slice(0, 20)) {
+        const shown = result.changedNodes.slice(0, 20);
+        console.log(chalk.bold(`Changed nodes (first ${shown.length} of ${result.changedNodes.length}):`));
+        for (const c of shown) {
           console.log(
             chalk.cyan(c.kind.padEnd(12)) +
               chalk.white(c.name) +
@@ -1197,6 +1229,9 @@ program
               chalk.dim(`(${c.changedFields.join(', ')})`),
           );
           console.log(chalk.dim(`  ${c.filePath}`));
+        }
+        if (result.changedNodes.length > shown.length) {
+          console.log(chalk.dim(`  …+${result.changedNodes.length - shown.length} more (use --json for full output)`));
         }
         console.log();
       }
