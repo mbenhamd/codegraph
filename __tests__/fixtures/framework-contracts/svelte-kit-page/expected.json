@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    {
+      "id": "route:src/routes/blog/+page.svelte:/blog:1",
+      "kind": "route",
+      "name": "/blog",
+      "qualifiedName": "src/routes/blog/+page.svelte::route:/blog",
+      "filePath": "src/routes/blog/+page.svelte",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "language": "svelte"
+    }
+  ],
+  "references": []
+}

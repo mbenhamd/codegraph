@@ -1,0 +1,5 @@
+{
+  "resolver": "vue",
+  "sourcePath": "src/pages/users.vue",
+  "description": "Nuxt page convention (path containing `/pages/<name>.vue`) produces a route node for `/users`. The Vue extractor matches the literal `/pages/` substring in the project-relative path, so the fixture sourcePath includes a leading directory."
+}

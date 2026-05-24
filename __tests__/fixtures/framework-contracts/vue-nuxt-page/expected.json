@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    {
+      "id": "route:src/pages/users.vue:/users:1",
+      "kind": "route",
+      "name": "/users",
+      "qualifiedName": "src/pages/users.vue::route:/users",
+      "filePath": "src/pages/users.vue",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "language": "vue"
+    }
+  ],
+  "references": []
+}

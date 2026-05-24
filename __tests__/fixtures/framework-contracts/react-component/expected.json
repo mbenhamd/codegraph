@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {
+      "id": "component:src/components/UserList.tsx:UserList:1",
+      "kind": "component",
+      "name": "UserList",
+      "qualifiedName": "src/components/UserList.tsx::UserList",
+      "filePath": "src/components/UserList.tsx",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 25,
+      "language": "tsx",
+      "isExported": true
+    }
+  ],
+  "references": []
+}
