@@ -102,27 +102,45 @@ const RENAMED_IDENTIFIER_TYPES = new Set<string>(['identifier']);
  *                          grammar slips one through, preserve it.
  */
 const SEMANTIC_PARENT_TYPES = new Set<string>([
+  // Python member access. `obj.start()` parses as
+  // `attribute(identifier "obj", identifier "start")` — both
+  // children are plain `identifier`, type-only rename would
+  // conflate `obj.start()` with `obj.stop()`. Preserve both for
+  // safety (loses Type-2 detection on the receiver name, but never
+  // produces a semantic false positive). Same trade-off applies to
+  // every set-membership entry below.
   'attribute',
+  // JS/TS member access via plain identifier (some grammar shapes
+  // emit `identifier` rather than `property_identifier`).
   'member_expression',
   'subscript_expression',
+  // Codex round 4: Java method invocation. `obj.start()` parses as
+  // `method_invocation(identifier "obj", identifier "start")` —
+  // both `object` and `name` fields are plain `identifier`.
+  'method_invocation',
+  // Codex round 4: C# member access + invocation.
+  // `obj.Start()` → `invocation_expression > member_access_expression(identifier "obj", identifier "Start")`.
+  'member_access_expression',
+  'invocation_expression',
+  // Codex round 4: Rust scoped paths and field access.
+  // `Router::new()` → `call_expression > scoped_identifier(identifier "Router", identifier "new")`.
+  // Both `path` and `name` children of scoped_identifier are
+  // identifiers carrying module/function semantics.
+  'scoped_identifier',
+  'scoped_call_expression',
+  'field_expression',
+  // Defensive — top-level module reference + type identifier as
+  // direct parent (rare for plain `identifier`, but cheap to keep).
   'module',
   'type_identifier',
-  // Codex round 2 finding: Python `g(start=1)` parses as
+  // Codex round 2: Python `g(start=1)` parses as
   // `keyword_argument(name: identifier "start", value: integer)`.
   // The `name` field IS part of the call contract — `g(start=1)`
-  // and `g(stop=1)` must NOT share astShapeHash.
-  //
-  // v1 trade-off (Codex round 3 confirmed acceptable, deferred to a
-  // follow-up): set-membership rather than field-specific check
-  // means any identifier LEAF whose direct parent is
-  // `keyword_argument` is preserved — including a value-side
-  // identifier like `g(start=count)`, where `count` is a local
-  // that would ideally be renamed by Type-2. A tighter
-  // `parent.childForFieldName('name')` check would only preserve
-  // the name child; we accept the over-preservation in v1 because
-  // the cost is "miss some Type-2 detection" (false negative on
-  // duplicates), not the "conflate semantic names" failure mode
-  // (false positive) the BLOCKER guarded against.
+  // and `g(stop=1)` must NOT share astShapeHash. Set-membership
+  // here means a value-side identifier like `g(start=count)` is
+  // also preserved (Codex round 3 noted: acceptable v1 trade-off,
+  // accepts "miss some Type-2 detection" rather than risk
+  // conflating semantic names).
   'keyword_argument',
 ]);
 
@@ -139,10 +157,14 @@ const SEMANTIC_PARENT_TYPES = new Set<string>([
  *      `Array<User>` with `Array<Admin>`.
  *   3. Parent type is in `SEMANTIC_PARENT_TYPES` — see Set comment.
  *   4. Parent is `call` / `call_expression` AND `node` IS the
- *      parent's `function`-field child (the callee, not an argument).
- *      Catches bare-call semantics: `start()` vs `stop()` must NOT
- *      conflate even when both are `identifier` callees in Python.
- *   5. Otherwise the identifier is treated as a local-ish use and
+ *      parent's `function`-field child (Python/JS callee position).
+ *      Catches `start()` vs `stop()` when both are bare callees.
+ *   5. Parent is `call` (Ruby's dual-purpose call type) AND `node`
+ *      IS the `method`-field child. Ruby `user.start` parses as
+ *      `call(receiver: identifier "user", method: identifier "start")`;
+ *      `function` field is null but `method` field carries the
+ *      member name. Codex round 4 verified via real Ruby parse.
+ *   6. Otherwise the identifier is treated as a local-ish use and
  *      gets renamed.
  */
 function shouldPreserveIdentifier(node: SyntaxNode, parent: SyntaxNode | null): boolean {
@@ -154,6 +176,10 @@ function shouldPreserveIdentifier(node: SyntaxNode, parent: SyntaxNode | null): 
   if (parentType === 'call' || parentType === 'call_expression') {
     const fnField = parent.childForFieldName('function');
     if (fnField && fnField.id === node.id) return true;
+    // Ruby `user.start` shape: `call(identifier "user", identifier
+    // "start")` with `method` field carrying the member name.
+    const methodField = parent.childForFieldName('method');
+    if (methodField && methodField.id === node.id) return true;
   }
   return false;
 }

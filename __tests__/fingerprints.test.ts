@@ -204,3 +204,57 @@ describe('PF-690: cross-language hash isolation', () => {
     expect(na.astShapeHash).not.toBe(nb.astShapeHash);
   });
 });
+
+describe('PF-690: cross-language member/callee name preservation (Codex round 4 BLOCKER)', () => {
+  // Codex round 4 verified via real tree-sitter-wasms parses that
+  // Ruby/Java/C#/Rust ALL emit plain `identifier` for member/callee
+  // positions. The original `attribute` + `call.function`-only rule
+  // covered Python but conflated semantic names in these four
+  // languages. SEMANTIC_PARENT_TYPES now includes:
+  //
+  //   - method_invocation         (Java)
+  //   - member_access_expression  (C#)
+  //   - invocation_expression     (C#)
+  //   - scoped_identifier         (Rust)
+  //   - scoped_call_expression    (Rust)
+  //   - field_expression          (Rust)
+  //
+  // And `call.method` field handled for Ruby's member-call shape.
+  // Each language gets a `start` vs `stop` regression below.
+
+  it('Ruby `user.start` vs `user.stop` produce DIFFERENT astShapeHash (call.method field preserved)', () => {
+    const a = 'def f(user)\n  user.start\nend\n';
+    const b = 'def f(user)\n  user.stop\nend\n';
+    const na = extractFirstNode('a.rb', a, 'f');
+    const nb = extractFirstNode('b.rb', b, 'f');
+    expect(na.astHash).not.toBe(nb.astHash);
+    expect(na.astShapeHash).not.toBe(nb.astShapeHash);
+  });
+
+  it('Java `obj.start()` vs `obj.stop()` produce DIFFERENT astShapeHash (method_invocation preserved)', () => {
+    const a = 'class C { void f(Object obj) { obj.start(); } }\n';
+    const b = 'class C { void f(Object obj) { obj.stop(); } }\n';
+    const na = extractFirstNode('a.java', a, 'f');
+    const nb = extractFirstNode('b.java', b, 'f');
+    expect(na.astHash).not.toBe(nb.astHash);
+    expect(na.astShapeHash).not.toBe(nb.astShapeHash);
+  });
+
+  it('C# `obj.Start()` vs `obj.Stop()` produce DIFFERENT astShapeHash (member_access_expression preserved)', () => {
+    const a = 'class C { void F(object obj) { obj.Start(); } }\n';
+    const b = 'class C { void F(object obj) { obj.Stop(); } }\n';
+    const na = extractFirstNode('a.cs', a, 'F');
+    const nb = extractFirstNode('b.cs', b, 'F');
+    expect(na.astHash).not.toBe(nb.astHash);
+    expect(na.astShapeHash).not.toBe(nb.astShapeHash);
+  });
+
+  it('Rust `Router::new()` vs `Router::default()` produce DIFFERENT astShapeHash (scoped_identifier preserved)', () => {
+    const a = 'fn f() { let r = Router::new(); }\n';
+    const b = 'fn f() { let r = Router::default(); }\n';
+    const na = extractFirstNode('a.rs', a, 'f');
+    const nb = extractFirstNode('b.rs', b, 'f');
+    expect(na.astHash).not.toBe(nb.astHash);
+    expect(na.astShapeHash).not.toBe(nb.astShapeHash);
+  });
+});

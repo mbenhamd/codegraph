@@ -100,12 +100,32 @@ const migrations: Migration[] = [
       // creation. No behavior change for code paths that don't read
       // these columns yet — they are pure data infrastructure for
       // future duplicate / diff / explain CLIs.
-      db.exec(`
-        ALTER TABLE nodes ADD COLUMN ast_hash TEXT DEFAULT NULL;
-        ALTER TABLE nodes ADD COLUMN ast_shape_hash TEXT DEFAULT NULL;
-        ALTER TABLE nodes ADD COLUMN sig_hash TEXT DEFAULT NULL;
-        ALTER TABLE nodes ADD COLUMN call_pattern_hash TEXT DEFAULT NULL;
-      `);
+      //
+      // Codex round 4 REVIEW: make each ALTER TABLE idempotent via
+      // `PRAGMA table_info`. Two processes opening a v5 database
+      // simultaneously could both read version 5, both enter this
+      // migration, and the second's `ALTER TABLE ADD COLUMN` would
+      // fail with "duplicate column" — even though the resulting
+      // schema is fine. Pre-checking via `table_info` collapses the
+      // second open's migration into a no-op for already-applied
+      // columns. `CREATE INDEX IF NOT EXISTS` below is already
+      // idempotent.
+      const cols = db
+        .prepare("PRAGMA table_info('nodes')")
+        .all() as Array<{ name: string }>;
+      const hasCol = (name: string): boolean => cols.some((c) => c.name === name);
+      if (!hasCol('ast_hash')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN ast_hash TEXT DEFAULT NULL');
+      }
+      if (!hasCol('ast_shape_hash')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN ast_shape_hash TEXT DEFAULT NULL');
+      }
+      if (!hasCol('sig_hash')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN sig_hash TEXT DEFAULT NULL');
+      }
+      if (!hasCol('call_pattern_hash')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN call_pattern_hash TEXT DEFAULT NULL');
+      }
       // Lookup indexes: duplicate-detection sweeps will
       // `WHERE ast_hash = ?` and `WHERE ast_shape_hash = ?` heavily,
       // so prepay the index cost rather than full-table-scanning
