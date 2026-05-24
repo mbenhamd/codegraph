@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/callers.json",
+  "title": "codegraph callers --json",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "type": "object",
+  "required": ["schemaVersion", "tool", "symbol", "callers"],
+  "additionalProperties": true,
+  "properties": {
+    "tool": { "const": "callers" },
+    "symbol": { "type": "string" },
+    "callers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "kind", "filePath"],
+        "properties": {
+          "name": { "type": "string" },
+          "kind": { "type": "string" },
+          "filePath": { "type": "string" },
+          "startLine": { "type": ["integer", "null"] },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "resolvedBy": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

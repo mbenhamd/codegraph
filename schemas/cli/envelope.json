@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/envelope.json",
+  "title": "CodeGraph CLI JSON envelope",
+  "description": "Every CodeGraph CLI --json output carries `schemaVersion` + `tool` at the top level so downstream consumers can branch on the version and verify the tool. Tool-specific payload fields appear alongside.",
+  "type": "object",
+  "required": ["schemaVersion", "tool"],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Envelope contract version. Bumped on backwards-incompatible changes to the envelope itself (not to a specific tool's payload)."
+    },
+    "tool": {
+      "type": "string",
+      "description": "Name of the CLI subcommand that produced this output (status, search, callers, callees, impact, affected, inventory, files).",
+      "enum": [
+        "status",
+        "search",
+        "callers",
+        "callees",
+        "impact",
+        "affected",
+        "inventory",
+        "files"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

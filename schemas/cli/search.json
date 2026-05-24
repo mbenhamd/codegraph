@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/search.json",
+  "title": "codegraph query --json (search)",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "type": "object",
+  "required": ["schemaVersion", "tool", "query", "results"],
+  "additionalProperties": true,
+  "properties": {
+    "tool": { "const": "search" },
+    "query": { "type": "string" },
+    "results": { "type": "array" }
+  }
+}

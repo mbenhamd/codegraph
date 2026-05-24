@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/impact.json",
+  "title": "codegraph impact --json",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "type": "object",
+  "required": ["schemaVersion", "tool", "symbol", "depth", "nodeCount", "edgeCount", "affected"],
+  "additionalProperties": true,
+  "properties": {
+    "tool": { "const": "impact" },
+    "symbol": { "type": "string" },
+    "depth": { "type": "integer", "minimum": 1 },
+    "nodeCount": { "type": "integer", "minimum": 0 },
+    "edgeCount": { "type": "integer", "minimum": 0 },
+    "affected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "kind", "filePath"],
+        "properties": {
+          "name": { "type": "string" },
+          "kind": { "type": "string" },
+          "filePath": { "type": "string" },
+          "startLine": { "type": ["integer", "null"] }
+        },
+        "additionalProperties": true
+      }
+    },
+    "lowConfidenceEdges": {
+      "type": "object",
+      "required": ["count", "threshold", "examples"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source", "target", "kind", "confidence"],
+            "properties": {
+              "source": { "type": "string" },
+              "target": { "type": "string" },
+              "kind": { "type": "string" },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+              "resolvedBy": { "type": "string" },
+              "line": { "type": ["integer", "null"] },
+              "sourceLocation": { "type": "string" },
+              "targetLocation": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
