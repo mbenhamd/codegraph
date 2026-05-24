@@ -1242,6 +1242,151 @@ program
   });
 
 /**
+ * codegraph duplicates [path]
+ *
+ * PF-692: clone detection over PF-690 fingerprint columns.
+ * Reports Type-1 (exact) and Type-2 (shape) clone groups under
+ * the council-locked defaults: function+method kinds, ≥10 lines,
+ * shape groups whose members already form an exact group are
+ * suppressed.
+ */
+program
+  .command('duplicates [path]')
+  .description('Find clone groups in the index using PF-690 fingerprint columns')
+  .option(
+    '--kind <kinds>',
+    'Comma-separated symbol kinds to include (default: function,method)',
+  )
+  .option(
+    '--min-lines <number>',
+    'Minimum endLine-startLine+1 to keep a symbol (default: 10)',
+  )
+  .option('-j, --json', 'Output as JSON')
+  .action(
+    async (
+      projectPathArg: string | undefined,
+      options: { kind?: string; minLines?: string; json?: boolean },
+    ) => {
+      try {
+        // Match `status` / `index` / `sync`: walk up from the supplied
+        // path to find an initialized project. A user running
+        // `codegraph duplicates` from a subdirectory should resolve
+        // to the repo root, not look for `subdir/.codegraph/`.
+        const projectPath = resolveProjectPath(projectPathArg);
+        const dbPath = path.join(getCodeGraphDir(projectPath), 'codegraph.db');
+        if (!fs.existsSync(dbPath)) {
+          error(
+            `CodeGraph index not found at ${dbPath}. Run \`codegraph init -i\` in this directory first.`,
+          );
+          process.exit(1);
+        }
+
+        const kinds = options.kind
+          ? options.kind
+              .split(',')
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0)
+          : undefined;
+        let minLines: number | undefined;
+        if (options.minLines !== undefined) {
+          // Strict positive-integer match — `parseInt` would happily
+          // accept `10abc` / `1.5` / `+10`, hiding typos.
+          if (!/^[1-9]\d*$/.test(options.minLines)) {
+            error(`--min-lines must be a positive integer, got: ${options.minLines}`);
+            process.exit(1);
+          }
+          minLines = Number.parseInt(options.minLines, 10);
+        }
+
+        const { findDuplicates, DEFAULT_DUPLICATE_KINDS, DEFAULT_MIN_LINES } =
+          await import('../duplicates');
+        const result = findDuplicates(dbPath, { kinds, minLines });
+
+        if (options.json) {
+          console.log(
+            JSON.stringify(
+              cliJsonEnvelope('duplicates', result as unknown as Record<string, unknown>),
+              null,
+              2,
+            ),
+          );
+          return;
+        }
+
+        const s = result.summary;
+        const usedKinds = kinds ?? DEFAULT_DUPLICATE_KINDS;
+        const usedMinLines = minLines ?? DEFAULT_MIN_LINES;
+        const cov = s.fingerprintCoverage;
+
+        console.log(chalk.bold('\nCodeGraph Duplicates\n'));
+        console.log(chalk.cyan('Database:'), dbPath);
+        console.log(
+          chalk.dim(
+            `  kinds=${usedKinds.join(',')}  min-lines=${usedMinLines}  ` +
+              `coverage=${cov.withAstHash}/${cov.eligible} eligible nodes have fingerprints`,
+          ),
+        );
+        console.log();
+        console.log(chalk.bold('Summary:'));
+        console.log(`  Exact clone groups (Type-1):  ${formatNumber(s.exactGroups)}`);
+        console.log(`  Shape clone groups (Type-2):  ${formatNumber(s.shapeGroups)}`);
+        console.log(`  Exact-duplicate nodes:        ${formatNumber(s.exactNodes)}`);
+        console.log(`  Shape-only duplicate nodes:   ${formatNumber(s.shapeNodes)}`);
+        console.log();
+
+        if (result.groups.length === 0) {
+          console.log(
+            chalk.dim(
+              `No duplicate groups found with kinds=${usedKinds.join(',')}, ` +
+                `min-lines=${usedMinLines}, ${cov.withAstHash}/${cov.eligible} ` +
+                `eligible nodes have fingerprints.`,
+            ),
+          );
+          return;
+        }
+
+        const shown = result.groups.slice(0, 20);
+        const totalHiddenMembers = result.groups
+          .reduce((acc, g) => acc + Math.max(0, g.members.length - 5), 0);
+        console.log(chalk.bold(`Groups (first ${shown.length} of ${result.groups.length}):`));
+        for (const g of shown) {
+          const tag = g.kind === 'shape' && g.coveredByExactGroup ? ' [contains exact subset]' : '';
+          console.log(
+            chalk.cyan(g.kind.padEnd(6)) +
+              chalk.dim(g.fingerprint.slice(0, 12)) +
+              ' ' +
+              chalk.white(`${g.members.length} members in ${g.fileCount} file(s)`) +
+              chalk.yellow(tag),
+          );
+          for (const m of g.members.slice(0, 5)) {
+            console.log(
+              chalk.dim(`  ${m.filePath}:${m.startLine}`) +
+                ' ' +
+                chalk.white(m.qualifiedName),
+            );
+          }
+          if (g.members.length > 5) {
+            console.log(chalk.dim(`  …+${g.members.length - 5} more members`));
+          }
+        }
+        if (result.groups.length > shown.length || totalHiddenMembers > 0) {
+          console.log();
+          console.log(
+            chalk.yellow(
+              `Output truncated: ${result.groups.length - shown.length} more group(s) ` +
+                `and ${totalHiddenMembers} more member(s) hidden. Use --json for full output.`,
+            ),
+          );
+        }
+        console.log();
+      } catch (err) {
+        error(`Duplicates failed: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+    },
+  );
+
+/**
  * codegraph files [path]
  */
 program

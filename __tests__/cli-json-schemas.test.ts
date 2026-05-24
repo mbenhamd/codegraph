@@ -403,4 +403,56 @@ describe('PF-613 follow-up: CLI JSON schema validation', () => {
       cleanup();
     }
   });
+
+  // PF-692: `codegraph duplicates` JSON output conforms to schemas/cli/duplicates.json.
+  // PR #40 round 2 REVIEW fix: use a fixture with a REAL duplicate
+  // so the group/member subschema (fileCount, coveredByExactGroup,
+  // members minItems:2) is exercised, not just the empty-output
+  // envelope shape.
+  itIfDist('duplicates with a real clone fixture conforms to schemas/cli/duplicates.json', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-pf613b-dup-'));
+    projectDir = dir;
+    try {
+      fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+      // Same-named function in two files with a body large enough
+      // to clear the default --min-lines=10 floor.
+      const body = `{
+  const a = 1;
+  const b = 2;
+  const c = 3;
+  const d = 4;
+  const e = 5;
+  const f = 6;
+  const g = 7;
+  const h = 8;
+  return a + b + c + d + e + f + g + h;
+}`;
+      fs.writeFileSync(
+        path.join(dir, 'src', 'a.ts'),
+        `export function shared(x: number): number ${body}\n`,
+      );
+      fs.writeFileSync(
+        path.join(dir, 'src', 'b.ts'),
+        `export function shared(x: number): number ${body}\n`,
+      );
+      fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"pf613-dup","version":"0"}\n');
+      execFileSync(NODE_BIN, [DIST_BIN, 'init', '-i', dir], { stdio: 'ignore' });
+
+      const validate = loadValidator('duplicates');
+      const out = runCliJson(['duplicates', dir, '--json']) as {
+        groups?: Array<{ kind: string; members: unknown[]; fileCount: number; coveredByExactGroup: boolean }>;
+        summary?: { exactGroups: number; shapeGroups: number };
+      };
+      expectValid(validate, out);
+      // Real duplicates → at least one exact group with fileCount=2.
+      expect(out.summary!.exactGroups).toBeGreaterThanOrEqual(1);
+      const exact = out.groups!.find((g) => g.kind === 'exact');
+      expect(exact, 'expected at least one exact group').toBeDefined();
+      expect(exact!.fileCount).toBe(2);
+      expect(exact!.coveredByExactGroup).toBe(false);
+      expect(exact!.members.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      cleanup();
+    }
+  });
 });
