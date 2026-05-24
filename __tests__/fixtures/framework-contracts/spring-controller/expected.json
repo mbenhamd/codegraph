@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "route:src/main/java/com/example/controller/UserController.java:9:GET:/users",
+      "kind": "route",
+      "name": "GET /users",
+      "qualifiedName": "src/main/java/com/example/controller/UserController.java::route:/users",
+      "filePath": "src/main/java/com/example/controller/UserController.java",
+      "startLine": 9,
+      "endLine": 9,
+      "startColumn": 0,
+      "endColumn": 21,
+      "language": "java"
+    }
+  ],
+  "references": [
+    {
+      "fromNodeId": "route:src/main/java/com/example/controller/UserController.java:9:GET:/users",
+      "referenceName": "list",
+      "referenceKind": "references",
+      "line": 9,
+      "column": 0,
+      "filePath": "src/main/java/com/example/controller/UserController.java",
+      "language": "java"
+    }
+  ]
+}

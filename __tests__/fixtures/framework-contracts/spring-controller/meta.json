@@ -1,0 +1,5 @@
+{
+  "resolver": "spring",
+  "sourcePath": "src/main/java/com/example/controller/UserController.java",
+  "description": "Spring @GetMapping on a method inside an @RestController class — produces one route node referencing the controller method."
+}

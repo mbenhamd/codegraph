@@ -1,0 +1,5 @@
+{
+  "resolver": "fastapi",
+  "sourcePath": "api/items.py",
+  "description": "FastAPI @app.get decorator — produces one route node referencing the decorated handler function."
+}
