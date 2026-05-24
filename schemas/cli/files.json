@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/files.json",
+  "title": "codegraph files --json",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "type": "object",
+  "required": ["schemaVersion", "tool", "files"],
+  "additionalProperties": true,
+  "properties": {
+    "tool": { "const": "files" },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "language", "nodeCount", "size"],
+        "properties": {
+          "path": { "type": "string" },
+          "language": { "type": "string" },
+          "nodeCount": { "type": "integer", "minimum": 0 },
+          "size": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

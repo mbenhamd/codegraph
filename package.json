@@ -10,6 +10,7 @@
   "files": [
     "dist",
     "scripts",
+    "schemas",
     "README.md"
   ],
   "scripts": {
@@ -23,6 +24,7 @@
     "test:eval": "npm run build && tsc -p tsconfig.eval.json && node --liftoff-only .eval-build/__tests__/evaluation/runner.js",
     "test:eval:structural": "npm run build && tsc -p tsconfig.eval.json && node --liftoff-only .eval-build/__tests__/evaluation/runner.js --fixture structural",
     "test:eval:structural:strict": "npm run build && tsc -p tsconfig.eval.json && node --liftoff-only .eval-build/__tests__/evaluation/runner.js --fixture structural --strict-tracked",
+    "test:schemas": "npm run build && node --liftoff-only ./node_modules/vitest/vitest.mjs run __tests__/cli-json-schemas.test.ts",
     "bench:index": "npm run build && node --liftoff-only dist/bin/codegraph.js benchmark",
     "eval": "npm run test:eval --",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
@@ -50,6 +52,7 @@
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^20.19.30",
     "@types/picomatch": "^4.0.2",
+    "ajv": "^8.20.0",
     "tsx": "^4.22.3",
     "typescript": "^5.0.0",
     "vitest": "^2.1.9"

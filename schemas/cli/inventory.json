@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/inventory.json",
+  "title": "codegraph inventory --json",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "type": "object",
+  "required": ["schemaVersion", "tool", "inventory"],
+  "additionalProperties": true,
+  "properties": {
+    "tool": { "const": "inventory" },
+    "inventory": {
+      "type": "object",
+      "required": ["schemaVersion", "projectPath", "summary", "packages", "artifacts"],
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1,
+          "description": "Inventory data-shape version (PF-624). Independent of the CLI envelope's schemaVersion at the top level."
+        },
+        "projectPath": { "type": "string" },
+        "generatedAt": { "type": "string" },
+        "summary": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "packages": { "type": "array" },
+        "artifacts": { "type": "array" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

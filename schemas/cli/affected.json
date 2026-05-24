@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/affected.json",
+  "title": "codegraph affected --json",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "type": "object",
+  "required": ["schemaVersion", "tool", "changedFiles", "affectedTests", "totalDependentsTraversed"],
+  "additionalProperties": true,
+  "properties": {
+    "tool": { "const": "affected" },
+    "changedFiles": { "type": "array", "items": { "type": "string" } },
+    "affectedTests": { "type": "array", "items": { "type": "string" } },
+    "totalDependentsTraversed": { "type": "integer", "minimum": 0 }
+  }
+}

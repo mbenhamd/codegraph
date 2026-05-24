@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/status.json",
+  "title": "codegraph status --json",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "type": "object",
+  "required": ["schemaVersion", "tool", "initialized", "projectPath"],
+  "additionalProperties": true,
+  "properties": {
+    "tool": { "const": "status" },
+    "initialized": { "type": "boolean" },
+    "projectPath": { "type": "string" },
+    "fileCount": { "type": "integer", "minimum": 0 },
+    "nodeCount": { "type": "integer", "minimum": 0 },
+    "edgeCount": { "type": "integer", "minimum": 0 },
+    "dbSizeBytes": { "type": "integer", "minimum": 0 },
+    "backend": { "type": "string" },
+    "journalMode": { "type": ["string", "null"] }
+  }
+}
