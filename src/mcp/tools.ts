@@ -221,7 +221,7 @@ function numberSourceLines(slice: string, firstLineNumber: number): string {
  * argv, or telemetry the attack becomes trivial, and the right fix is to not
  * follow links from /tmp paths in the first place.
  */
-import { formatEdgeProvenance } from '../edge-provenance';
+import { formatEdgeProvenance, summarizeLowConfidenceEdges } from '../edge-provenance';
 import { ProjectAccessGate } from './project-access';
 
 function markSessionConsulted(sessionId: string): void {
@@ -1929,6 +1929,35 @@ export class ToolHandler {
       `## Impact: "${symbol}" affects ${nodeCount} symbols`,
       '',
     ];
+
+    // PF-606 follow-up: surface edges in the impact subgraph whose
+    // resolver confidence is below the LOW_CONFIDENCE_THRESHOLD so
+    // agents can branch on uncertainty rather than treating the full
+    // impact set as ground truth. Place this BEFORE the per-file
+    // listing — `truncateOutput` trims the tail of borderline
+    // responses, and the uncertainty signal is exactly the part that
+    // shouldn't disappear when budget is tight.
+    const lowConf = summarizeLowConfidenceEdges(impact.edges);
+    if (lowConf.count > 0) {
+      const totalEdges = impact.edges.length;
+      lines.push(
+        `⚠ ${lowConf.count} of ${totalEdges} edges have confidence < ${lowConf.threshold.toFixed(2)} — verify against source before treating as authoritative.`,
+      );
+      const nodeById = impact.nodes;
+      for (const ex of lowConf.examples) {
+        const sourceNode = nodeById.get(ex.source);
+        const targetNode = nodeById.get(ex.target);
+        const sourceLoc = sourceNode
+          ? `${sourceNode.filePath}${ex.line !== undefined ? ':' + ex.line : sourceNode.startLine ? ':' + sourceNode.startLine : ''}`
+          : ex.source;
+        const targetLoc = targetNode
+          ? `${targetNode.filePath}${targetNode.startLine ? ':' + targetNode.startLine : ''}`
+          : ex.target;
+        const reason = ex.resolvedBy ? `${ex.resolvedBy} ${ex.confidence.toFixed(2)}` : ex.confidence.toFixed(2);
+        lines.push(`  - [${reason}] ${ex.kind}: ${sourceLoc} → ${targetLoc}`);
+      }
+      lines.push('');
+    }
 
     // Group by file
     const byFile = new Map<string, Node[]>();

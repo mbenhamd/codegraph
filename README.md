@@ -422,6 +422,18 @@ about), `0.7–0.9` as likely-correct same-module matches, `0.4–0.7` as
 cross-module matches worth verifying, and `< 0.4` as suggestions you
 should double-check against source.
 
+#### Impact confidence annotation
+
+`codegraph impact` and `codegraph_impact` (MCP) also surface a
+low-confidence edge summary when the blast-radius subgraph includes
+edges with `confidence < 0.5`. Text output appends a `⚠` line plus the
+first few examples; JSON output adds `lowConfidenceEdges: { count,
+threshold, examples }`. Treat impact results with a non-zero
+`lowConfidenceEdges.count` as risk reports — the count tells you how
+many edges in the impact set are weakly-resolved (fuzzy, distant
+exact-match, instance-method heuristic) and need source verification
+before you treat the impact as the full answer.
+
 ### MCP cross-project allowlist
 
 When running as `codegraph serve --mcp`, the server gates the optional
