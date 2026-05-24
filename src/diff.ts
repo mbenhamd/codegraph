@@ -503,7 +503,16 @@ function edgeChangedFields(oldRow: EdgeRow, newRow: EdgeRow): string[] {
  */
 export function diffDatabases(oldDbPath: string, newDbPath: string): DiffResult {
   const oldDb = openReadOnly(oldDbPath);
-  const newDb = openReadOnly(newDbPath);
+  // If opening the new DB throws, close the already-opened old DB
+  // before propagating — otherwise the SQLite handle leaks (Codex
+  // PR review P2 finding).
+  let newDb: SqliteReadOnly;
+  try {
+    newDb = openReadOnly(newDbPath);
+  } catch (err) {
+    oldDb.close();
+    throw err;
+  }
   try {
     const oldNodes = loadNodes(oldDb);
     const newNodes = loadNodes(newDb);
