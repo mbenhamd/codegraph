@@ -162,10 +162,13 @@ export class CSSExtractor {
   private walk(node: SyntaxNode): void {
     if (node.type === 'rule_set') {
       this.handleRuleSet(node);
-      // Don't descend into the block — declarations aren't selector
-      // nodes. But nested rules (SCSS-style, not pure CSS) live inside
-      // the block and would need recursive descent. tree-sitter-css
-      // doesn't parse SCSS nesting, so this is a no-op for plain CSS.
+      // PF-698: scan the rule's declarations for CSS custom property
+      // definitions (`--color-primary: #fff;`) and `var()` usages.
+      // Selectors and tokens are tracked together at the rule level
+      // because both relate to the rule's block; selector extraction
+      // ran inside `handleRuleSet`, token extraction runs here.
+      const block = ruleSetBlock(node);
+      if (block) this.handleRuleBlock(block);
       return;
     }
     if (node.type === 'import_statement' || node.type === 'at_rule') {
@@ -173,6 +176,17 @@ export class CSSExtractor {
     }
     if (node.type === 'media_statement' || node.type === 'supports_statement') {
       // @media / @supports wrap rule sets; recurse into their block.
+      // PF-698 Codex REVIEW: `@supports (color: var(--x))` puts a
+      // `var()` call inside the CONDITION expression, not inside a
+      // declared rule. Collect var refs from the condition node
+      // BEFORE recursing — otherwise feature-queries that gate on a
+      // token are blind in the index.
+      if (node.type === 'supports_statement' && this.fileNodeId !== null) {
+        for (let i = 0; i < node.namedChildCount; i++) {
+          const child = node.namedChild(i);
+          if (child && child.type !== 'block') this.collectVarRefs(child);
+        }
+      }
       for (let i = 0; i < node.namedChildCount; i++) {
         const child = node.namedChild(i);
         if (child) this.walk(child);
@@ -380,6 +394,138 @@ export class CSSExtractor {
       language: 'css',
     });
   }
+
+  /**
+   * PF-698: walk a rule's `block` for token definitions and usages.
+   * Emits one `css_variable` node per `--var-name` declaration; for
+   * every `call_expression` whose function is `var(...)`, emits an
+   * unresolved reference targeting the variable name. The existing
+   * exact-name resolver wires usages to defs.
+   *
+   * Tokens are linked via the file node on both ends — definitions
+   * `contains`-edged from the file, usages emitted as references
+   * from the file. Per-selector linking is more granular but
+   * Phase C MVP keeps it simple; consumers can pivot via the
+   * existing selector→file `contains` chain.
+   */
+  private handleRuleBlock(block: SyntaxNode): void {
+    if (this.fileNodeId === null) return;
+    for (let i = 0; i < block.namedChildCount; i++) {
+      const child = block.namedChild(i);
+      if (!child) continue;
+      if (child.type === 'declaration') {
+        this.handleDeclaration(child);
+      }
+    }
+  }
+
+  private handleDeclaration(decl: SyntaxNode): void {
+    if (this.fileNodeId === null) return;
+
+    const propertyName = decl.namedChildren.find((c) => c?.type === 'property_name');
+    if (propertyName) {
+      const propText = getNodeText(propertyName, this.source);
+      if (propText.startsWith('--')) {
+        this.emitTokenDef(decl, propText);
+      }
+    }
+
+    // Walk the entire declaration for `var(...)` usages — values can
+    // contain calc(var(--x)), color-mix(in srgb, var(--a), var(--b)),
+    // anything nested. A full recursive descent over the declaration
+    // catches all nesting levels without enumerating value-node types.
+    this.collectVarRefs(decl);
+  }
+
+  private emitTokenDef(decl: SyntaxNode, varName: string): void {
+    const startLine = decl.startPosition.row + 1;
+    const endLine = decl.endPosition.row + 1;
+    const startCol = decl.startPosition.column;
+    const endCol = decl.endPosition.column;
+
+    // Value preview: everything after the `property:`, capped.
+    const fullText = getNodeText(decl, this.source).replace(/\s+/g, ' ').trim();
+    const colonIdx = fullText.indexOf(':');
+    const valuePreview =
+      colonIdx >= 0 ? fullText.slice(colonIdx + 1).trim().replace(/;$/, '').trim() : fullText;
+    const signaturePreview =
+      valuePreview.length > 120 ? valuePreview.slice(0, 120) + '…' : valuePreview;
+
+    const id = generateNodeId(this.filePath, 'css_variable', varName, startLine);
+    const node: Node = {
+      id,
+      kind: 'css_variable',
+      name: varName,
+      qualifiedName: `${this.filePath}::${varName}`,
+      filePath: this.filePath,
+      language: 'css',
+      startLine,
+      endLine,
+      startColumn: startCol,
+      endColumn: endCol,
+      signature: signaturePreview,
+      updatedAt: Date.now(),
+    };
+    this.nodes.push(node);
+    this.edges.push({
+      source: this.fileNodeId!,
+      target: id,
+      kind: 'contains',
+    });
+  }
+
+  /**
+   * Recursive descent through a declaration value looking for
+   * `call_expression` with `function_name === 'var'`. Each var()
+   * usage emits an UnresolvedReference to the named variable so
+   * the existing resolver wires it to a `css_variable` node by
+   * exact name match.
+   */
+  private collectVarRefs(node: SyntaxNode): void {
+    if (node.type === 'call_expression') {
+      const fn = node.namedChildren.find((c) => c?.type === 'function_name');
+      if (fn && getNodeText(fn, this.source) === 'var') {
+        const args = node.namedChildren.find((c) => c?.type === 'arguments');
+        if (args) {
+          // First plain_value inside arguments is the --var-name.
+          // (Subsequent values are the fallback expression.)
+          const firstArg = args.namedChild(0);
+          if (firstArg && firstArg.type === 'plain_value') {
+            const varName = getNodeText(firstArg, this.source).trim();
+            if (varName.startsWith('--')) {
+              this.unresolvedReferences.push({
+                fromNodeId: this.fileNodeId!,
+                referenceName: varName,
+                referenceKind: 'references',
+                line: node.startPosition.row + 1,
+                column: node.startPosition.column,
+                filePath: this.filePath,
+                language: 'css',
+              });
+            }
+          }
+        }
+      }
+    }
+    // Recurse — `calc(var(--x))` and `color-mix(in srgb, var(--a),
+    // var(--b))` need full descent.
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (child) this.collectVarRefs(child);
+    }
+  }
+}
+
+/**
+ * Locate the `block` child of a `rule_set` so the token extractor
+ * can re-enter it after `handleRuleSet` returns.
+ */
+function ruleSetBlock(ruleSet: SyntaxNode): SyntaxNode | null {
+  for (let i = 0; i < ruleSet.namedChildCount; i++) {
+    const c = ruleSet.namedChild(i);
+    if (c?.type === 'block') return c;
+  }
+  return null;
 }
 
 /**

@@ -135,6 +135,54 @@ button:hover { background: gray; }
     expect(selectors.map((s) => s.name)).toContain('.layout');
   });
 
+  it('emits css_variable nodes for `:root { --foo: ... }` declarations (PF-698)', () => {
+    const css = `:root {
+  --color-primary: #ffffff;
+  --color-secondary: hsl(200, 50%, 50%);
+  --spacing-base: 8px;
+}
+.btn { color: var(--color-primary); }
+`;
+    const result = extractFromCss('styles/tokens.css', css);
+    const tokens = result.nodes.filter((n) => n.kind === 'css_variable');
+    expect(tokens.map((t) => t.name)).toEqual(
+      expect.arrayContaining(['--color-primary', '--color-secondary', '--spacing-base']),
+    );
+    // Value preview lives in signature.
+    const primary = tokens.find((t) => t.name === '--color-primary')!;
+    expect(primary.signature).toContain('#ffffff');
+  });
+
+  it('emits unresolved references for var() usages (PF-698)', () => {
+    const css = `.btn { color: var(--color-primary); background: var(--color-secondary, blue); }\n`;
+    const result = extractFromCss('styles/btn.css', css);
+    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'references');
+    expect(refs.map((r) => r.referenceName)).toEqual(
+      expect.arrayContaining(['--color-primary', '--color-secondary']),
+    );
+  });
+
+  it('collects var() refs inside @supports condition expressions (PF-698 Codex REVIEW fix)', () => {
+    const css = `@supports (color: var(--brand)) {
+  .x { color: var(--brand); }
+}
+`;
+    const result = extractFromCss('styles/x.css', css);
+    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'references');
+    // Two refs: one inside the @supports condition, one inside the rule.
+    const brandRefs = refs.filter((r) => r.referenceName === '--brand');
+    expect(brandRefs.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('walks nested function calls — calc(var(--x)) — and collects inner var() refs (PF-698)', () => {
+    const css = `.layout { width: calc(100% - var(--sidebar-w) - var(--gap)); }\n`;
+    const result = extractFromCss('styles/layout.css', css);
+    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'references');
+    expect(refs.map((r) => r.referenceName)).toEqual(
+      expect.arrayContaining(['--sidebar-w', '--gap']),
+    );
+  });
+
   it('produces no false-positive selectors for malformed CSS', () => {
     const css = `not actually css { ;;; }`;
     const result = extractFromCss('styles/bad.css', css);
@@ -209,6 +257,122 @@ describe('PF-695: CSS extractor end-to-end via CodeGraph.init', () => {
     expect(text).toContain('.feature-card__title');
     expect(text).not.toContain('.unrelated-thing');
     expect(text).not.toMatch(/\.feature-card\b[^_]/); // .feature-card without __title shouldn't show
+  });
+
+  it('resolves var() usages to css_variable nodes across files (PF-698 end-to-end)', async () => {
+    fixture = await makeProject({
+      'src/styles/tokens.css': `:root {
+  --color-primary: #ffffff;
+  --spacing-base: 8px;
+}
+`,
+      'src/styles/feature.css': `.feature-card {
+  color: var(--color-primary);
+  padding: var(--spacing-base);
+}
+`,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite') as {
+      DatabaseSync: new (p: string) => { prepare: (s: string) => { all: (...a: unknown[]) => unknown[] }; close: () => void };
+    };
+    const db = new DatabaseSync(fixture.dbPath);
+    // Verify both tokens were extracted.
+    const tokens = db.prepare("SELECT name FROM nodes WHERE kind = 'css_variable'").all() as Array<{ name: string }>;
+    expect(tokens.map((t) => t.name)).toEqual(
+      expect.arrayContaining(['--color-primary', '--spacing-base']),
+    );
+    // Verify cross-file resolution: references edge from feature.css's
+    // file node → token node defined in tokens.css.
+    const edges = db
+      .prepare(
+        `SELECT e.kind, ns.file_path AS src_file, nt.name AS tgt_name
+         FROM edges e
+         JOIN nodes ns ON ns.id = e.source
+         JOIN nodes nt ON nt.id = e.target
+         WHERE e.kind = 'references' AND nt.kind = 'css_variable'`,
+      )
+      .all() as Array<{ src_file: string; tgt_name: string }>;
+    db.close();
+    const tgts = edges.map((e) => e.tgt_name);
+    expect(tgts, `expected references to css_variable nodes; got: ${JSON.stringify(edges)}`).toContain('--color-primary');
+    expect(tgts).toContain('--spacing-base');
+  });
+
+  it('exposes tokens via the codegraph_token_definitions MCP tool (PF-698)', async () => {
+    fixture = await makeProject({
+      'src/styles/tokens.css': `:root {
+  --color-primary: #ffffff;
+  --color-danger: #ff0000;
+  --spacing-base: 8px;
+}
+`,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { ToolHandler } = await import('../src/mcp/tools');
+    const handler = new ToolHandler(null);
+    const result = await handler.execute('codegraph_token_definitions', {
+      projectPath: fixture.dir,
+      pattern: 'color',
+    });
+    expect(result.isError).toBeFalsy();
+    const text = result.content[0]!.text as string;
+    expect(text).toContain('## CSS tokens matching `color`');
+    expect(text).toContain('--color-primary');
+    expect(text).toContain('--color-danger');
+    expect(text).not.toContain('--spacing-base');
+  });
+
+  it('exposes token consumers via the codegraph_token_usage MCP tool (PF-698)', async () => {
+    fixture = await makeProject({
+      'src/styles/tokens.css': ':root { --color-primary: #ffffff; }\n',
+      'src/styles/btn.css': '.btn { color: var(--color-primary); }\n',
+      'src/styles/card.css': '.card { border-color: var(--color-primary); }\n',
+      'src/styles/unrelated.css': '.x { color: red; }\n',
+    });
+    const { ToolHandler } = await import('../src/mcp/tools');
+    const handler = new ToolHandler(null);
+    const result = await handler.execute('codegraph_token_usage', {
+      projectPath: fixture.dir,
+      token: '--color-primary',
+    });
+    expect(result.isError).toBeFalsy();
+    const text = result.content[0]!.text as string;
+    expect(text).toContain('## Files consuming `--color-primary`');
+    expect(text).toContain('btn.css');
+    expect(text).toContain('card.css');
+    expect(text).not.toContain('unrelated.css');
+  });
+
+  it('codegraph_token_usage rejects `var(--x)` wrapper input with guidance (Codex NITPICK fix)', async () => {
+    fixture = await makeProject({
+      'src/styles/tokens.css': ':root { --color-primary: #fff; }\n',
+    });
+    const { ToolHandler } = await import('../src/mcp/tools');
+    const handler = new ToolHandler(null);
+    const result = await handler.execute('codegraph_token_usage', {
+      projectPath: fixture.dir,
+      token: 'var(--color-primary)',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toMatch(/should be the variable name/i);
+  });
+
+  it('codegraph_token_usage accepts bare token names (auto-prefixes --)', async () => {
+    fixture = await makeProject({
+      'src/styles/tokens.css': ':root { --color-primary: #fff; }\n',
+      'src/styles/btn.css': '.btn { color: var(--color-primary); }\n',
+    });
+    const { ToolHandler } = await import('../src/mcp/tools');
+    const handler = new ToolHandler(null);
+    const result = await handler.execute('codegraph_token_usage', {
+      projectPath: fixture.dir,
+      token: 'color-primary', // no -- prefix
+    });
+    expect(result.isError).toBeFalsy();
+    const text = result.content[0]!.text as string;
+    expect(text).toContain('## Files consuming `--color-primary`');
+    expect(text).toContain('btn.css');
   });
 
   it('supports SCSS / LESS extensions via the CSS grammar', async () => {
