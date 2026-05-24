@@ -374,4 +374,33 @@ describe('PF-613 follow-up: CLI JSON schema validation', () => {
       cleanup();
     }
   });
+
+  // PF-691: `codegraph diff` JSON output conforms to schemas/cli/diff.json.
+  itIfDist('diff between two identical projects conforms to schemas/cli/diff.json', () => {
+    projectDir = setupProject();
+    // Re-use the same fixture as the "old" and "new" — diff should
+    // be empty but the envelope shape must still validate.
+    const dbPath = path.join(projectDir!, '.codegraph', 'codegraph.db');
+    try {
+      const validate = loadValidator('diff');
+      const out = runCliJson(['diff', dbPath, dbPath, '--json']) as {
+        addedNodes?: unknown[];
+        removedNodes?: unknown[];
+        changedNodes?: unknown[];
+        addedEdges?: unknown[];
+        removedEdges?: unknown[];
+        summary?: { addedNodes: number; removedNodes: number; changedNodes: number };
+      };
+      expectValid(validate, out);
+      // Identical DB vs itself: every diff field must be empty.
+      expect(out.addedNodes).toEqual([]);
+      expect(out.removedNodes).toEqual([]);
+      expect(out.changedNodes).toEqual([]);
+      expect(out.summary!.addedNodes).toBe(0);
+      expect(out.summary!.removedNodes).toBe(0);
+      expect(out.summary!.changedNodes).toBe(0);
+    } finally {
+      cleanup();
+    }
+  });
 });

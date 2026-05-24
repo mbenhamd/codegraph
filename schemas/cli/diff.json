@@ -1,0 +1,110 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/diff.json",
+  "title": "codegraph diff --json",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "tool",
+    "addedNodes",
+    "removedNodes",
+    "changedNodes",
+    "addedEdges",
+    "removedEdges",
+    "summary"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "tool": { "const": "diff" },
+    "addedNodes": {
+      "type": "array",
+      "description": "Nodes present in the new DB but not in the old DB, matched by node ID.",
+      "items": { "$ref": "#/definitions/nodeSnapshot" }
+    },
+    "removedNodes": {
+      "type": "array",
+      "description": "Nodes present in the old DB but not in the new DB.",
+      "items": { "$ref": "#/definitions/nodeSnapshot" }
+    },
+    "changedNodes": {
+      "type": "array",
+      "description": "Nodes whose ID exists in both DBs but one or more tracked fields differ.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "kind", "filePath", "changedFields", "old", "new"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "kind": { "type": "string" },
+          "filePath": { "type": "string" },
+          "changedFields": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Field names that differ between old and new. Drives downstream drift classification: astHash = body change, sigHash/signature = contract change, qualifiedName = rename, etc."
+          },
+          "old": { "$ref": "#/definitions/nodeSnapshot" },
+          "new": { "$ref": "#/definitions/nodeSnapshot" }
+        }
+      }
+    },
+    "addedEdges": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/edgeIdentity" }
+    },
+    "removedEdges": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/edgeIdentity" }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "addedNodes",
+        "removedNodes",
+        "changedNodes",
+        "addedEdges",
+        "removedEdges"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "addedNodes": { "type": "integer", "minimum": 0 },
+        "removedNodes": { "type": "integer", "minimum": 0 },
+        "changedNodes": { "type": "integer", "minimum": 0 },
+        "addedEdges": { "type": "integer", "minimum": 0 },
+        "removedEdges": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "definitions": {
+    "nodeSnapshot": {
+      "type": "object",
+      "required": ["qualifiedName", "filePath", "startLine", "endLine", "language"],
+      "additionalProperties": true,
+      "properties": {
+        "qualifiedName": { "type": "string" },
+        "filePath": { "type": "string" },
+        "startLine": { "type": "integer", "minimum": 0 },
+        "endLine": { "type": "integer", "minimum": 0 },
+        "language": { "type": "string" },
+        "signature": { "type": ["string", "null"] },
+        "astHash": { "type": ["string", "null"] },
+        "astShapeHash": { "type": ["string", "null"] },
+        "sigHash": { "type": ["string", "null"] },
+        "callPatternHash": { "type": ["string", "null"] }
+      }
+    },
+    "edgeIdentity": {
+      "type": "object",
+      "required": ["source", "target", "kind", "line", "col"],
+      "additionalProperties": true,
+      "properties": {
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "kind": { "type": "string" },
+        "line": { "type": "integer", "description": "-1 represents NULL line (file-level / synthesized edge)" },
+        "col": { "type": "integer", "description": "-1 represents NULL col" }
+      }
+    }
+  }
+}

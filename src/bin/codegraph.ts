@@ -1134,6 +1134,79 @@ program
   });
 
 /**
+ * codegraph diff <oldDb> <newDb>
+ *
+ * PF-691: DB-vs-DB structural diff. Operates on already-built
+ * `.codegraph/codegraph.db` files — the caller handles git
+ * checkouts. Output enumerates added/removed/changed nodes (with
+ * field-level change lists) and added/removed edges.
+ */
+program
+  .command('diff <oldDb> <newDb>')
+  .description('Structural diff between two .codegraph/codegraph.db files')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (oldDbPath: string, newDbPath: string, options: { json?: boolean }) => {
+    try {
+      if (!fs.existsSync(oldDbPath)) {
+        error(`Old database not found: ${oldDbPath}`);
+        process.exit(1);
+      }
+      if (!fs.existsSync(newDbPath)) {
+        error(`New database not found: ${newDbPath}`);
+        process.exit(1);
+      }
+
+      const { diffDatabases } = await import('../diff');
+      const result = diffDatabases(oldDbPath, newDbPath);
+
+      if (options.json) {
+        // DiffResult is a structured object the envelope schema
+        // describes via per-tool docs; cast through unknown so the
+        // envelope helper's `Record<string, unknown>` signature
+        // accepts the typed shape without losing the structure.
+        console.log(
+          JSON.stringify(
+            cliJsonEnvelope('diff', result as unknown as Record<string, unknown>),
+            null,
+            2,
+          ),
+        );
+        return;
+      }
+
+      const s = result.summary;
+      console.log(chalk.bold('\nCodeGraph Diff\n'));
+      console.log(chalk.cyan('Old:'), oldDbPath);
+      console.log(chalk.cyan('New:'), newDbPath);
+      console.log();
+      console.log(chalk.bold('Summary:'));
+      console.log(`  Nodes added:     ${formatNumber(s.addedNodes)}`);
+      console.log(`  Nodes removed:   ${formatNumber(s.removedNodes)}`);
+      console.log(`  Nodes changed:   ${formatNumber(s.changedNodes)}`);
+      console.log(`  Edges added:     ${formatNumber(s.addedEdges)}`);
+      console.log(`  Edges removed:   ${formatNumber(s.removedEdges)}`);
+      console.log();
+
+      if (result.changedNodes.length > 0) {
+        console.log(chalk.bold('Changed nodes (first 20):'));
+        for (const c of result.changedNodes.slice(0, 20)) {
+          console.log(
+            chalk.cyan(c.kind.padEnd(12)) +
+              chalk.white(c.name) +
+              ' ' +
+              chalk.dim(`(${c.changedFields.join(', ')})`),
+          );
+          console.log(chalk.dim(`  ${c.filePath}`));
+        }
+        console.log();
+      }
+    } catch (err) {
+      error(`Diff failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
  * codegraph files [path]
  */
 program
