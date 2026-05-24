@@ -403,4 +403,24 @@ describe('PF-613 follow-up: CLI JSON schema validation', () => {
       cleanup();
     }
   });
+
+  // PF-692: `codegraph duplicates` JSON output conforms to schemas/cli/duplicates.json.
+  itIfDist('duplicates on the default project conforms to schemas/cli/duplicates.json', () => {
+    projectDir = setupProject();
+    try {
+      const validate = loadValidator('duplicates');
+      const out = runCliJson(['duplicates', projectDir!, '--json']) as {
+        groups?: unknown[];
+        summary?: { exactGroups: number; shapeGroups: number };
+      };
+      expectValid(validate, out);
+      // Single-symbol fixture: no groups, but the envelope shape
+      // (top-level arrays + summary) must validate.
+      expect(out.summary!.exactGroups).toBe(0);
+      expect(out.summary!.shapeGroups).toBe(0);
+      expect(out.groups).toEqual([]);
+    } finally {
+      cleanup();
+    }
+  });
 });

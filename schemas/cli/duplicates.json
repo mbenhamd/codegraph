@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://codegraph.papersflow.ai/schemas/cli/duplicates.json",
+  "title": "CodeGraph CLI `duplicates --json` output",
+  "description": "Clone detection over PF-690 fingerprint columns. Reports Type-1 (exact `ast_hash`) and Type-2 (`ast_shape_hash`) clone groups. Shape groups that exactly cover an existing exact group are suppressed; remaining shape groups are genuine Type-2 findings with at least one member that differs from the exact-hash neighbors.",
+  "allOf": [
+    {
+      "$ref": "https://codegraph.papersflow.ai/schemas/cli/envelope.json"
+    },
+    {
+      "type": "object",
+      "required": ["tool", "groups", "summary"],
+      "properties": {
+        "tool": { "const": "duplicates" },
+        "groups": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/group" }
+        },
+        "summary": {
+          "type": "object",
+          "required": ["exactGroups", "shapeGroups", "exactNodes", "shapeNodes"],
+          "properties": {
+            "exactGroups": { "type": "integer", "minimum": 0 },
+            "shapeGroups": { "type": "integer", "minimum": 0 },
+            "exactNodes": { "type": "integer", "minimum": 0 },
+            "shapeNodes": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "group": {
+      "type": "object",
+      "required": ["kind", "fingerprint", "members"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["exact", "shape"],
+          "description": "`exact` = members share `ast_hash` (Type-1). `shape` = members share `ast_shape_hash` only (Type-2, after exact-group dedup)."
+        },
+        "fingerprint": {
+          "type": "string",
+          "description": "The hash value shared by every member of this group (`ast_hash` for `exact`, `ast_shape_hash` for `shape`)."
+        },
+        "members": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/definitions/member" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "member": {
+      "type": "object",
+      "required": [
+        "id",
+        "qualifiedName",
+        "filePath",
+        "startLine",
+        "endLine",
+        "language",
+        "symbolKind"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "qualifiedName": { "type": "string" },
+        "filePath": { "type": "string" },
+        "startLine": { "type": "integer", "minimum": 0 },
+        "endLine": { "type": "integer", "minimum": 0 },
+        "language": { "type": "string" },
+        "symbolKind": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
