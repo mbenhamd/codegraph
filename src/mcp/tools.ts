@@ -713,6 +713,49 @@ export const tools: ToolDefinition[] = [
     },
   },
   {
+    name: 'codegraph_token_definitions',
+    description:
+      'PF-698 (Phase C). List CSS custom properties (design tokens) — every `--var-name: value` declaration anywhere in the indexed CSS. Returns the token name, value preview, and `file.css:line` for each. Use when answering "what tokens does this design system define" or "what does `--color-primary` evaluate to". Phase C is CSS-tokens-only; Tailwind theme keys and TS theme objects are deferred to follow-up phases. **SCSS caveat**: tree-sitter-css does not parse SCSS-style nested rules; token declarations nested inside SCSS rule bodies (`.a { .b { --x: 1; } }`) are not indexed. Standard CSS-compatible SCSS works (top-level `:root` + flat rules).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pattern: {
+          type: 'string',
+          description:
+            'Optional substring filter on the variable name (e.g. `color`, `spacing`). Omit to list all.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum tokens to return (default 100, max 1000).',
+          default: 100,
+        },
+        projectPath: projectPathProperty,
+      },
+    },
+  },
+  {
+    name: 'codegraph_token_usage',
+    description:
+      'PF-698 (Phase C). For a design token (e.g. `--color-primary`), list every CSS file that consumes it via `var(--color-primary)`. Walks the `references` edges set up by the CSS extractor + existing resolver. Use when answering "if I rename or remove this token, what CSS breaks", or for token drift detection between two indexes via `codegraph_diff`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        token: {
+          type: 'string',
+          description:
+            'Token name including the leading `--` (e.g. `--color-primary`). Bare names (`color-primary`) are auto-prefixed.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum consumer files to return (default 50, max 500).',
+          default: 50,
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['token'],
+    },
+  },
+  {
     name: 'codegraph_explain',
     description:
       'Surface a single edge\'s persisted resolver provenance (PF-693). Answers "WHY does CodeGraph think this call resolves here?" by showing extractor (tree-sitter/scip/heuristic), resolver strategy (import/framework/qualified-name/exact-match/instance-method/file-path/fuzzy), confidence, raw metadata, and source/target node details. **Honest scope**: `traceAvailable: false` is locked at false today — the resolver discards loser strategy attempts; only the winner\'s tag survives. This surfaces breadcrumbs, not a causal explanation. Round-trip: get `edgeId` (or full `edge` identity) from `codegraph_callers`/`codegraph_callees` JSON output, pass it here.',
@@ -1071,6 +1114,10 @@ export class ToolHandler {
           return await this.handleClassConsumers(args);
         case 'codegraph_unused_selectors':
           return await this.handleUnusedSelectors(args);
+        case 'codegraph_token_definitions':
+          return await this.handleTokenDefinitions(args);
+        case 'codegraph_token_usage':
+          return await this.handleTokenUsage(args);
         default:
           return this.errorResult(`Unknown tool: ${toolName}`);
       }
@@ -3019,6 +3066,113 @@ export class ToolHandler {
     }
     if (unused.length === limit) {
       lines.push('', `> Truncated at \`limit=${limit}\`.`);
+    }
+
+    return this.textResult(this.truncateOutput(lines.join('\n')));
+  }
+
+  /**
+   * Handle codegraph_token_definitions — PF-698 Phase C. Enumerate
+   * `css_variable`-kind nodes (CSS custom properties extracted by
+   * the CSS extractor) with optional substring filter.
+   */
+  private async handleTokenDefinitions(args: Record<string, unknown>): Promise<ToolResult> {
+    const patternRaw = args.pattern;
+    const pattern = typeof patternRaw === 'string' ? patternRaw : undefined;
+    const limit = clamp(Number(args.limit) || 100, 1, 1000);
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+
+    const all = cg.getNodesByKind('css_variable');
+    const matching = pattern
+      ? all.filter((n) => n.name.includes(pattern) || n.qualifiedName.includes(pattern))
+      : all;
+
+    const shown = matching.slice(0, limit);
+    const lines: string[] = [
+      pattern
+        ? `## CSS tokens matching \`${pattern}\``
+        : '## CSS tokens (custom properties)',
+      '',
+      `Found **${matching.length}** token definition(s)${pattern ? ` for \`${pattern}\`` : ''} across the index.`,
+      '',
+    ];
+    if (shown.length === 0) {
+      lines.push(pattern
+        ? `_No tokens with names containing \`${pattern}\`._`
+        : '_No CSS custom properties indexed. Either no CSS files contain `--var: value;` declarations, or the index predates the PF-698 token extractor._');
+      return this.textResult(this.truncateOutput(lines.join('\n')));
+    }
+
+    for (const t of shown) {
+      const valuePreview = t.signature && t.signature.length > 0 ? ` — \`${t.signature}\`` : '';
+      lines.push(`- \`${t.name}\`${valuePreview}`);
+      lines.push(`  Defined at ${t.filePath}:${t.startLine}`);
+    }
+    if (matching.length > shown.length) {
+      lines.push('', `> Showing ${shown.length} of ${matching.length}; raise \`limit\` or narrow \`pattern\` for more.`);
+    }
+    return this.textResult(this.truncateOutput(lines.join('\n')));
+  }
+
+  /**
+   * Handle codegraph_token_usage — PF-698 Phase C. For a CSS
+   * variable, find every consumer file (one references edge per
+   * `var(--x)` site, sourced from the consuming file node).
+   */
+  private async handleTokenUsage(args: Record<string, unknown>): Promise<ToolResult> {
+    const rawToken = this.validateString(args.token, 'token');
+    if (typeof rawToken !== 'string') return rawToken;
+    const limit = clamp(Number(args.limit) || 50, 1, 500);
+
+    // Accept bare `color-primary` or `--color-primary`. Reject the
+    // wrapped form `var(--x)` explicitly — agents who copy from
+    // a CSS file frequently paste the whole call expression; tell
+    // them what to do (Codex NITPICK PF-698).
+    if (/^var\s*\(/.test(rawToken)) {
+      return this.errorResult(
+        `token should be the variable name (e.g. \`--color-primary\`), not the whole \`var(...)\` call. Drop the \`var(\` and \`)\`.`,
+      );
+    }
+    const tokenName = rawToken.startsWith('--') ? rawToken : '--' + rawToken;
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+
+    const defs = cg.getNodesByKind('css_variable').filter((n) => n.name === tokenName);
+    if (defs.length === 0) {
+      return this.textResult(`No CSS token named \`${tokenName}\` found in the index.`);
+    }
+
+    // Collect consumer FILE nodes via incoming references edges.
+    const consumerIds = new Set<string>();
+    for (const def of defs) {
+      for (const e of cg.getIncomingEdges(def.id)) {
+        if (e.kind !== 'references') continue;
+        consumerIds.add(e.source);
+        if (consumerIds.size >= limit) break;
+      }
+      if (consumerIds.size >= limit) break;
+    }
+
+    const lines: string[] = [
+      `## Files consuming \`${tokenName}\``,
+      '',
+      `Token defined in ${defs.length} location(s):`,
+    ];
+    for (const def of defs) {
+      const valuePreview = def.signature ? ` — \`${def.signature}\`` : '';
+      lines.push(`- ${def.filePath}:${def.startLine}${valuePreview}`);
+    }
+    lines.push('');
+
+    if (consumerIds.size === 0) {
+      lines.push(`_No files consume \`${tokenName}\` via \`var()\`. Possible reasons: (a) the token is defined but unused (consider removing); (b) consumers reference it through preprocessor variables / JS theme objects (out of Phase C scope); (c) consumers are in non-indexed files._`);
+      return this.textResult(this.truncateOutput(lines.join('\n')));
+    }
+
+    lines.push(`### Consumers (${consumerIds.size} file(s))`);
+    for (const id of consumerIds) {
+      const n = cg.getNode(id);
+      if (!n) continue;
+      lines.push(`- \`${n.filePath}\``);
     }
 
     return this.textResult(this.truncateOutput(lines.join('\n')));

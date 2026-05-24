@@ -44,6 +44,13 @@ export const NODE_KINDS = [
   // the rule body, and `metadata.specificity` (added by the CSS
   // extractor) holds the computed integer weight.
   'selector',
+  // PF-698: CSS custom property (design token). `:root { --color-primary: #fff }`
+  // emits one of these per `--var-name` declaration anywhere in the
+  // CSS. `name` is the variable name including the leading `--`;
+  // `signature` carries the value preview. `var(--color-primary)`
+  // usages emit unresolved references that the existing resolver
+  // wires to these nodes by exact name match.
+  'css_variable',
 ] as const;
 
 export type NodeKind = (typeof NODE_KINDS)[number];
