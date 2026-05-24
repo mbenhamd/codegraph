@@ -223,6 +223,7 @@ function numberSourceLines(slice: string, firstLineNumber: number): string {
  */
 import { formatEdgeProvenance, summarizeLowConfidenceEdges } from '../edge-provenance';
 import { ProjectAccessGate } from './project-access';
+import { PathFilter, parsePathFilterArgs } from './path-filter';
 
 function markSessionConsulted(sessionId: string): void {
   try {
@@ -274,6 +275,8 @@ interface PropertySchema {
   description: string;
   enum?: string[];
   default?: unknown;
+  /** JSON-Schema array-item schema (used by PF-609 path filter arrays). */
+  items?: { type: string };
 }
 
 /**
@@ -293,6 +296,32 @@ export interface ToolResult {
 const projectPathProperty: PropertySchema = {
   type: 'string',
   description: 'Path to a different project with .codegraph/ initialized. If omitted, uses current project. Use this to query other codebases.',
+};
+
+/**
+ * PF-609: shared `path` / `excludePath` filter properties applied to
+ * graph-tool outputs. Constrains results to / away from project-relative
+ * file path prefixes or glob-ish patterns so monorepo queries don't drag
+ * in vendor, generated, or unrelated package noise. Filters apply AFTER
+ * graph expansion and BEFORE ranking / output trimming, so traversal
+ * semantics stay intact.
+ */
+const pathFilterProperty: PropertySchema = {
+  type: 'array',
+  description:
+    'Restrict results to project-relative file path prefixes or glob-ish patterns. ' +
+    'Examples: ["packages/api/", "apps/web/src/"]. Supports `*` (single segment) and ' +
+    '`**` (any depth). Combine with `excludePath` to scope away noise too.',
+  items: { type: 'string' },
+};
+
+const excludePathFilterProperty: PropertySchema = {
+  type: 'array',
+  description:
+    'Drop results whose file path matches any of these project-relative prefixes or glob-ish patterns. ' +
+    'Examples: ["vendor/", "**/*.test.ts", "generated/"]. Useful for excluding tests, vendored ' +
+    'code, build output, or unrelated packages while keeping the rest of the result set.',
+  items: { type: 'string' },
 };
 
 /**
@@ -370,6 +399,8 @@ export const tools: ToolDefinition[] = [
           default: 20,
         },
         projectPath: projectPathProperty,
+        path: pathFilterProperty,
+        excludePath: excludePathFilterProperty,
       },
       required: ['symbol'],
     },
@@ -390,6 +421,8 @@ export const tools: ToolDefinition[] = [
           default: 20,
         },
         projectPath: projectPathProperty,
+        path: pathFilterProperty,
+        excludePath: excludePathFilterProperty,
       },
       required: ['symbol'],
     },
@@ -410,6 +443,8 @@ export const tools: ToolDefinition[] = [
           default: 2,
         },
         projectPath: projectPathProperty,
+        path: pathFilterProperty,
+        excludePath: excludePathFilterProperty,
       },
       required: ['symbol'],
     },
@@ -752,9 +787,11 @@ export class ToolHandler {
       if (typeof pathCheck === 'object' && pathCheck !== undefined) {
         return pathCheck;
       }
-      // The `path` and `pattern` properties used by codegraph_files are
-      // also path-shaped — apply the same cap.
-      if (args.path !== undefined) {
+      // PF-609: `path` is overloaded — codegraph_files takes a single
+      // string, codegraph_callers/callees/impact take a string array.
+      // Apply the string-length cap only when the arg is a string;
+      // array forms are validated per-element in parsePathFilterArgs.
+      if (typeof args.path === 'string') {
         const check = this.validateOptionalPath(args.path, 'path');
         if (typeof check === 'object' && check !== undefined) return check;
       }
@@ -896,6 +933,11 @@ export class ToolHandler {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
 
+    // PF-609: scope by path / excludePath before aggregation. Filter is
+    // applied to caller nodes (the source of the edge) — the requested
+    // symbol itself isn't filtered.
+    const pathFilter = new PathFilter(parsePathFilterArgs(args));
+
     // Aggregate callers across all matching symbols
     const seen = new Set<string>();
     const allCallers: Array<{ node: Node; edge?: Edge }> = [];
@@ -903,13 +945,15 @@ export class ToolHandler {
       for (const c of cg.getCallers(node.id)) {
         if (!seen.has(c.node.id)) {
           seen.add(c.node.id);
+          if (!pathFilter.matches(c.node.filePath)) continue;
           allCallers.push({ node: c.node, edge: c.edge });
         }
       }
     }
 
     if (allCallers.length === 0) {
-      return this.textResult(`No callers found for "${symbol}"${allMatches.note}`);
+      const scopeNote = pathFilter.isOpen() ? '' : ' (within configured path filter)';
+      return this.textResult(`No callers found for "${symbol}"${scopeNote}${allMatches.note}`);
     }
 
     const formatted = this.formatNodeList(allCallers.slice(0, limit), `Callers of ${symbol}`) + allMatches.note;
@@ -931,6 +975,9 @@ export class ToolHandler {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
 
+    // PF-609: scope by path / excludePath before aggregation.
+    const pathFilter = new PathFilter(parsePathFilterArgs(args));
+
     // Aggregate callees across all matching symbols
     const seen = new Set<string>();
     const allCallees: Array<{ node: Node; edge?: Edge }> = [];
@@ -938,13 +985,15 @@ export class ToolHandler {
       for (const c of cg.getCallees(node.id)) {
         if (!seen.has(c.node.id)) {
           seen.add(c.node.id);
+          if (!pathFilter.matches(c.node.filePath)) continue;
           allCallees.push({ node: c.node, edge: c.edge });
         }
       }
     }
 
     if (allCallees.length === 0) {
-      return this.textResult(`No callees found for "${symbol}"${allMatches.note}`);
+      const scopeNote = pathFilter.isOpen() ? '' : ' (within configured path filter)';
+      return this.textResult(`No callees found for "${symbol}"${scopeNote}${allMatches.note}`);
     }
 
     const formatted = this.formatNodeList(allCallees.slice(0, limit), `Callees of ${symbol}`) + allMatches.note;
@@ -966,6 +1015,11 @@ export class ToolHandler {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
 
+    // PF-609: scope by path / excludePath. Drop nodes outside the scope,
+    // then drop any edge whose endpoint refers to a dropped node so the
+    // low-confidence summary and per-file listing both honor the filter.
+    const pathFilter = new PathFilter(parsePathFilterArgs(args));
+
     // Aggregate impact across all matching symbols
     const mergedNodes = new Map<string, Node>();
     const mergedEdges: Edge[] = [];
@@ -974,9 +1028,13 @@ export class ToolHandler {
     for (const node of allMatches.nodes) {
       const impact = cg.getImpactRadius(node.id, depth);
       for (const [id, n] of impact.nodes) {
+        if (!pathFilter.matches(n.filePath)) continue;
         mergedNodes.set(id, n);
       }
       for (const e of impact.edges) {
+        // Defer dropping unmatched-endpoint edges until after the node
+        // set is fully built so reachable-from-multiple-roots cases
+        // aren't accidentally pruned.
         const key = `${e.source}->${e.target}:${e.kind}`;
         if (!seenEdges.has(key)) {
           seenEdges.add(key);
@@ -985,9 +1043,14 @@ export class ToolHandler {
       }
     }
 
+    // Drop edges whose endpoints are now out of scope.
+    const scopedEdges = pathFilter.isOpen()
+      ? mergedEdges
+      : mergedEdges.filter((e) => mergedNodes.has(e.source) && mergedNodes.has(e.target));
+
     const mergedImpact = {
       nodes: mergedNodes,
-      edges: mergedEdges,
+      edges: scopedEdges,
       roots: allMatches.nodes.map(n => n.id),
     };
 

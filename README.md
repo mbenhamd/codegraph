@@ -422,6 +422,31 @@ about), `0.7–0.9` as likely-correct same-module matches, `0.4–0.7` as
 cross-module matches worth verifying, and `< 0.4` as suggestions you
 should double-check against source.
 
+#### Scoping with `path` / `excludePath`
+
+`codegraph_callers`, `codegraph_callees`, and `codegraph_impact` (MCP)
+accept optional `path` and `excludePath` arrays of project-relative
+prefixes or glob-ish patterns to constrain results to / away from
+specific subtrees. Examples:
+
+```jsonc
+{ "symbol": "doSomething", "path": ["packages/api/", "apps/web/"] }
+{ "symbol": "doSomething", "excludePath": ["vendor/", "**/*.test.ts"] }
+```
+
+Pattern semantics:
+- `*` matches a single path segment (no `/`).
+- `**` matches any depth.
+- Trailing `/` makes the pattern a directory prefix.
+- All other characters are matched literally (regex metacharacters are
+  escaped automatically).
+
+Filtering applies AFTER graph expansion and BEFORE ranking / output
+trimming, so traversal semantics are unaffected — only what the agent
+sees is scoped down. Filtered-out edges also drop out of the
+PF-606b low-confidence summary so that annotation reflects the
+visible scope.
+
 #### Impact confidence annotation
 
 `codegraph impact` and `codegraph_impact` (MCP) also surface a
