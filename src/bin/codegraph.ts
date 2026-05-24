@@ -28,7 +28,12 @@ import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getCodeGraphDir, isInitialized } from '../directory';
-import { extractEdgeProvenance, formatEdgeProvenance } from '../edge-provenance';
+import {
+  extractEdgeProvenance,
+  formatEdgeProvenance,
+  summarizeLowConfidenceEdges,
+  type LowConfidenceSummary,
+} from '../edge-provenance';
 import type { Edge } from '../types';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
@@ -1721,8 +1726,7 @@ program
 
       // Merge impact subgraphs across all exact-matching symbols
       const mergedNodes = new Map<string, { name: string; kind: string; filePath: string; startLine?: number }>();
-      const seenEdges = new Set<string>();
-      let edgeCount = 0;
+      const dedupedEdges = new Map<string, Edge>();
 
       for (const match of matches) {
         const exactMatch = match.node.name === symbol || match.node.name.endsWith(`.${symbol}`) || match.node.name.endsWith(`::${symbol}`);
@@ -1733,9 +1737,8 @@ program
         }
         for (const e of impact.edges) {
           const key = `${e.source}->${e.target}:${e.kind}`;
-          if (!seenEdges.has(key)) {
-            seenEdges.add(key);
-            edgeCount++;
+          if (!dedupedEdges.has(key)) {
+            dedupedEdges.set(key, e);
           }
         }
       }
@@ -1746,16 +1749,46 @@ program
         for (const [id, n] of impact.nodes) {
           mergedNodes.set(id, { name: n.name, kind: n.kind, filePath: n.filePath, startLine: n.startLine });
         }
-        edgeCount = impact.edges.length;
+        for (const e of impact.edges) {
+          const key = `${e.source}->${e.target}:${e.kind}`;
+          if (!dedupedEdges.has(key)) {
+            dedupedEdges.set(key, e);
+          }
+        }
       }
+
+      const edges = [...dedupedEdges.values()];
+      const lowConf: LowConfidenceSummary = summarizeLowConfidenceEdges(edges);
+
+      // Resolve example node IDs to filePath:startLine for human-readable
+      // text output. Raw IDs are useless for verifying against source.
+      const formatExampleEndpoint = (nodeId: string, edgeLine?: number): string => {
+        const node = mergedNodes.get(nodeId);
+        if (!node) return nodeId;
+        const loc = edgeLine ?? node.startLine;
+        return loc ? `${node.filePath}:${loc}` : node.filePath;
+      };
+
+      // Enrich JSON examples with sourceLocation / targetLocation so
+      // programmatic consumers see source-verifiable paths next to the
+      // raw IDs (raw IDs preserved for callers that key off them).
+      const lowConfJson = {
+        ...lowConf,
+        examples: lowConf.examples.map((ex) => ({
+          ...ex,
+          sourceLocation: formatExampleEndpoint(ex.source, ex.line),
+          targetLocation: formatExampleEndpoint(ex.target),
+        })),
+      };
 
       if (options.json) {
         console.log(JSON.stringify({
           symbol,
           depth,
           nodeCount: mergedNodes.size,
-          edgeCount,
+          edgeCount: edges.length,
           affected: Array.from(mergedNodes.values()),
+          lowConfidenceEdges: lowConfJson,
         }, null, 2));
       } else if (mergedNodes.size === 0) {
         info(`No affected symbols found for "${symbol}"`);
@@ -1775,6 +1808,19 @@ program
           for (const node of nodes) {
             const loc = node.startLine ? `:${node.startLine}` : '';
             console.log(`  ${chalk.dim(node.kind.padEnd(12))}${node.name}${chalk.dim(loc)}`);
+          }
+          console.log();
+        }
+
+        if (lowConf.count > 0) {
+          console.log(
+            chalk.yellow(`⚠ ${lowConf.count} of ${edges.length} edges have confidence < ${lowConf.threshold.toFixed(2)} — verify against source.`),
+          );
+          for (const ex of lowConf.examples) {
+            const reason = ex.resolvedBy ? `${ex.resolvedBy} ${ex.confidence.toFixed(2)}` : ex.confidence.toFixed(2);
+            const sourceLoc = formatExampleEndpoint(ex.source, ex.line);
+            const targetLoc = formatExampleEndpoint(ex.target);
+            console.log(chalk.dim(`  - [${reason}] ${ex.kind}: ${sourceLoc} → ${targetLoc}`));
           }
           console.log();
         }

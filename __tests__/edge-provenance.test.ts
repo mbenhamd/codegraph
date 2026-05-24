@@ -149,3 +149,67 @@ describe('edge provenance surfacing in graph queries (PF-606)', () => {
     expect(formatEdgeProvenance(callerEdge)).toMatch(/^\[[a-z-]+ \d\.\d{2}\]$/);
   });
 });
+
+describe('summarizeLowConfidenceEdges (PF-606 follow-up)', () => {
+  function makeEdge(
+    source: string,
+    target: string,
+    kind: Edge['kind'],
+    metadata?: Record<string, unknown>,
+  ): Edge {
+    return { source, target, kind, ...(metadata ? { metadata } : {}) };
+  }
+
+  it('counts edges below the threshold and surfaces deterministic examples', async () => {
+    const { summarizeLowConfidenceEdges } = await import('../src/edge-provenance');
+    const edges: Edge[] = [
+      makeEdge('a', 'b', 'calls', { resolvedBy: 'import', confidence: 0.95 }),
+      makeEdge('a', 'c', 'calls', { resolvedBy: 'fuzzy', confidence: 0.3 }),
+      makeEdge('a', 'd', 'calls', { resolvedBy: 'exact-match', confidence: 0.4 }),
+      makeEdge('a', 'e', 'references', { resolvedBy: 'qualified-name', confidence: 0.85 }),
+      makeEdge('z', 'x', 'instantiates', { resolvedBy: 'instance-method', confidence: 0.25 }),
+      makeEdge('z', 'y', 'calls'), // no metadata — not counted
+    ];
+    const summary = summarizeLowConfidenceEdges(edges);
+    expect(summary.count).toBe(3);
+    expect(summary.threshold).toBeCloseTo(0.5, 3);
+    expect(summary.examples).toHaveLength(3);
+    // Ordered by confidence ascending — lowest first.
+    expect(summary.examples[0]?.confidence).toBeCloseTo(0.25, 3);
+    expect(summary.examples[1]?.confidence).toBeCloseTo(0.3, 3);
+    expect(summary.examples[2]?.confidence).toBeCloseTo(0.4, 3);
+  });
+
+  it('caps examples at maxExamples while still reporting the full count', async () => {
+    const { summarizeLowConfidenceEdges } = await import('../src/edge-provenance');
+    const edges: Edge[] = Array.from({ length: 12 }, (_, i) =>
+      makeEdge(`s${i}`, `t${i}`, 'calls', { resolvedBy: 'fuzzy', confidence: 0.1 + i * 0.01 }),
+    );
+    const summary = summarizeLowConfidenceEdges(edges, { maxExamples: 3 });
+    expect(summary.count).toBe(12);
+    expect(summary.examples).toHaveLength(3);
+  });
+
+  it('returns count 0 + empty examples when no edges are low-confidence', async () => {
+    const { summarizeLowConfidenceEdges } = await import('../src/edge-provenance');
+    const edges: Edge[] = [
+      makeEdge('a', 'b', 'calls', { resolvedBy: 'import', confidence: 0.95 }),
+      makeEdge('a', 'c', 'references', { resolvedBy: 'qualified-name', confidence: 0.85 }),
+    ];
+    const summary = summarizeLowConfidenceEdges(edges);
+    expect(summary.count).toBe(0);
+    expect(summary.examples).toEqual([]);
+  });
+
+  it('honors a custom threshold', async () => {
+    const { summarizeLowConfidenceEdges } = await import('../src/edge-provenance');
+    const edges: Edge[] = [
+      makeEdge('a', 'b', 'calls', { resolvedBy: 'import', confidence: 0.85 }),
+      makeEdge('a', 'c', 'calls', { resolvedBy: 'exact-match', confidence: 0.65 }),
+    ];
+    const strict = summarizeLowConfidenceEdges(edges, { threshold: 0.9 });
+    expect(strict.count).toBe(2);
+    const loose = summarizeLowConfidenceEdges(edges, { threshold: 0.5 });
+    expect(loose.count).toBe(0);
+  });
+});
