@@ -509,6 +509,17 @@ export interface BuildContextOptions {
 
   /** Minimum semantic similarity score (default: 0.3) */
   minScore?: number;
+
+  /**
+   * PF-618: opt-in ranking diagnostics. When true, the markdown / JSON
+   * output includes a `Ranking Diagnostics` section explaining which
+   * path-level signals (vendor/generated/build/source-root demotion or
+   * boost, test/spec down-weighting) shifted the result ordering. When
+   * false (default) the section is omitted so normal MCP/CLI responses
+   * stay compact. Per-result FTS/CamelCase/co-location breakdowns are
+   * a follow-up slice; this flag pins the opt-in surface for them.
+   */
+  diagnostics?: boolean;
 }
 
 /**

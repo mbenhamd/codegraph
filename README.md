@@ -447,6 +447,27 @@ sees is scoped down. Filtered-out edges also drop out of the
 PF-606b low-confidence summary so that annotation reflects the
 visible scope.
 
+#### Ranking diagnostics
+
+`codegraph_context` accepts an optional `diagnostics: true` flag.
+When set, the response includes a `Ranking Diagnostics` block listing
+which path-level signals shifted the result ordering — vendor /
+generated / build / source-root demotion or boost, test/spec
+down-weighting. Default is off so normal responses stay compact.
+
+Format is debug-oriented and subject to change. Treat it as a tool
+for understanding why a query returned particular results; don't key
+production code off the exact reason strings.
+
+**Behavior change (PF-618):** prior versions populated the
+`rankingDiagnostics` field on `TaskContext` (returned from
+`buildContext(..., { format: 'json' })`) automatically whenever
+path-level signals fired. With PF-618 the field is **omitted** from
+the JSON payload unless `diagnostics: true` is passed. Direct
+`buildContext` consumers that read the field must opt in explicitly;
+MCP/CLI callers that didn't pass the flag never saw the data either
+way and aren't affected.
+
 #### Impact confidence annotation
 
 `codegraph impact` and `codegraph_impact` (MCP) also surface a

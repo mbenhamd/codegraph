@@ -105,7 +105,13 @@ export function formatContextAsJson(context: TaskContext): string {
     })),
     relatedFiles: context.relatedFiles,
     stats: context.stats,
-    rankingDiagnostics: context.rankingDiagnostics ?? [],
+    // PF-618: omit the field entirely when diagnostics aren't populated
+    // so the default JSON shape stays compact and the contract matches
+    // the markdown formatter (which only renders the block when the
+    // field is present and non-empty).
+    ...(context.rankingDiagnostics && context.rankingDiagnostics.length > 0
+      ? { rankingDiagnostics: context.rankingDiagnostics }
+      : {}),
   };
 
   return JSON.stringify(serializable, null, 2);

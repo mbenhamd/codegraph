@@ -378,6 +378,15 @@ export const tools: ToolDefinition[] = [
           description: 'Include code snippets for key symbols (default: true)',
           default: true,
         },
+        diagnostics: {
+          type: 'boolean',
+          description:
+            'PF-618: include a `Ranking Diagnostics` block explaining which path-level signals ' +
+            '(vendor/generated/build/source-root demotion or boost, test/spec down-weighting) ' +
+            'shifted the result ordering. Default off so normal responses stay compact. ' +
+            'Format is debug-oriented and subject to change.',
+          default: false,
+        },
         projectPath: projectPathProperty,
       },
       required: ['task'],
@@ -868,10 +877,12 @@ export class ToolHandler {
     const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const maxNodes = (args.maxNodes as number) || 20;
     const includeCode = args.includeCode !== false;
+    const diagnostics = args.diagnostics === true;
 
     const context = await cg.buildContext(task, {
       maxNodes,
       includeCode,
+      diagnostics,
       format: 'markdown',
     });
 
