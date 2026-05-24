@@ -161,6 +161,38 @@ export interface Node {
 
   /** When the node was last updated */
   updatedAt: number;
+
+  /**
+   * PF-690 fingerprint: SHA-256 of the symbol's normalized AST token
+   * stream with identifiers + literals preserved exactly. Two symbols
+   * with the same `astHash` differ only in whitespace/comments
+   * (Type-1 clone). `null` for synthesized nodes without a parsed
+   * body (e.g. framework-extractor route nodes).
+   */
+  astHash?: string | null;
+
+  /**
+   * PF-690 fingerprint: same as `astHash` but with local
+   * `identifier` leaves replaced by `_ID`. Catches renamed-locals
+   * clones (Type-2). Property/field/type identifiers preserved.
+   * `null` for synthesized nodes.
+   */
+  astShapeHash?: string | null;
+
+  /**
+   * PF-690 fingerprint: SHA-256 of the symbol's signature string.
+   * Cheap drift signal for "did this function's external contract
+   * change". `null` when no signature was extracted.
+   */
+  sigHash?: string | null;
+
+  /**
+   * PF-690 fingerprint: SHA-256 of the sorted set of outgoing edge
+   * targets+kinds. Populated by the resolution pass, NOT extraction,
+   * because it depends on resolved cross-file references. `null`
+   * until resolution completes.
+   */
+  callPatternHash?: string | null;
 }
 
 /**

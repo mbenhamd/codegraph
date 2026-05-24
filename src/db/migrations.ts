@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /**
  * Migration definition
@@ -87,6 +87,34 @@ const migrations: Migration[] = [
       db.exec(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
           ON edges(source, target, kind, COALESCE(line, -1), COALESCE(col, -1));
+      `);
+    },
+  },
+  {
+    version: 6,
+    description:
+      'Add per-symbol fingerprint columns (ast_hash, ast_shape_hash, sig_hash, call_pattern_hash) for duplicate detection + drift analysis (PF-690)',
+    up: (db) => {
+      // All four columns nullable: existing rows stay NULL until the
+      // next index sweep backfills them. New nodes get populated at
+      // creation. No behavior change for code paths that don't read
+      // these columns yet — they are pure data infrastructure for
+      // future duplicate / diff / explain CLIs.
+      db.exec(`
+        ALTER TABLE nodes ADD COLUMN ast_hash TEXT DEFAULT NULL;
+        ALTER TABLE nodes ADD COLUMN ast_shape_hash TEXT DEFAULT NULL;
+        ALTER TABLE nodes ADD COLUMN sig_hash TEXT DEFAULT NULL;
+        ALTER TABLE nodes ADD COLUMN call_pattern_hash TEXT DEFAULT NULL;
+      `);
+      // Lookup indexes: duplicate-detection sweeps will
+      // `WHERE ast_hash = ?` and `WHERE ast_shape_hash = ?` heavily,
+      // so prepay the index cost rather than full-table-scanning
+      // every duplicates query later. Partial-index on NOT NULL
+      // keeps the indexes tight — existing rows that never get a
+      // hash don't occupy index space.
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_nodes_ast_hash ON nodes(ast_hash) WHERE ast_hash IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_nodes_ast_shape_hash ON nodes(ast_shape_hash) WHERE ast_shape_hash IS NOT NULL;
       `);
     },
   },

@@ -45,6 +45,10 @@ interface NodeRow {
   decorators: string | null;
   type_parameters: string | null;
   updated_at: number;
+  ast_hash: string | null;
+  ast_shape_hash: string | null;
+  sig_hash: string | null;
+  call_pattern_hash: string | null;
 }
 
 interface EdgeRow {
@@ -106,6 +110,16 @@ function rowToNode(row: NodeRow): Node {
     decorators: row.decorators ? safeJsonParse(row.decorators, undefined) : undefined,
     typeParameters: row.type_parameters ? safeJsonParse(row.type_parameters, undefined) : undefined,
     updatedAt: row.updated_at,
+    // PF-690: round-trip the fingerprint columns. Nullable on the
+    // DB side; we expose them as `string | null` so downstream tools
+    // (codegraph_duplicates, codegraph_diff, codegraph_explain) can
+    // distinguish "not yet computed" (null) from "computed and known
+    // empty" (would never happen — empty bodies still produce a hash
+    // over the empty token stream).
+    astHash: row.ast_hash,
+    astShapeHash: row.ast_shape_hash,
+    sigHash: row.sig_hash,
+    callPatternHash: row.call_pattern_hash,
   };
 }
 
@@ -205,13 +219,15 @@ export class QueryBuilder {
           start_line, end_line, start_column, end_column,
           docstring, signature, visibility,
           is_exported, is_async, is_static, is_abstract,
-          decorators, type_parameters, updated_at
+          decorators, type_parameters, updated_at,
+          ast_hash, ast_shape_hash, sig_hash, call_pattern_hash
         ) VALUES (
           @id, @kind, @name, @qualifiedName, @filePath, @language,
           @startLine, @endLine, @startColumn, @endColumn,
           @docstring, @signature, @visibility,
           @isExported, @isAsync, @isStatic, @isAbstract,
-          @decorators, @typeParameters, @updatedAt
+          @decorators, @typeParameters, @updatedAt,
+          @astHash, @astShapeHash, @sigHash, @callPatternHash
         )
       `);
     }
@@ -255,6 +271,13 @@ export class QueryBuilder {
       decorators: node.decorators ? JSON.stringify(node.decorators) : null,
       typeParameters: node.typeParameters ? JSON.stringify(node.typeParameters) : null,
       updatedAt: node.updatedAt ?? Date.now(),
+      // PF-690: pass-through fingerprints. extractor sets ast_hash +
+      // ast_shape_hash + sig_hash; callPatternHash stays null until
+      // the resolution pass updates it via a separate write.
+      astHash: node.astHash ?? null,
+      astShapeHash: node.astShapeHash ?? null,
+      sigHash: node.sigHash ?? null,
+      callPatternHash: node.callPatternHash ?? null,
     });
   }
 
@@ -294,7 +317,11 @@ export class QueryBuilder {
           is_abstract = @isAbstract,
           decorators = @decorators,
           type_parameters = @typeParameters,
-          updated_at = @updatedAt
+          updated_at = @updatedAt,
+          ast_hash = @astHash,
+          ast_shape_hash = @astShapeHash,
+          sig_hash = @sigHash,
+          call_pattern_hash = @callPatternHash
         WHERE id = @id
       `);
     }
@@ -329,6 +356,10 @@ export class QueryBuilder {
       decorators: node.decorators ? JSON.stringify(node.decorators) : null,
       typeParameters: node.typeParameters ? JSON.stringify(node.typeParameters) : null,
       updatedAt: node.updatedAt ?? Date.now(),
+      astHash: node.astHash ?? null,
+      astShapeHash: node.astShapeHash ?? null,
+      sigHash: node.sigHash ?? null,
+      callPatternHash: node.callPatternHash ?? null,
     });
   }
 
