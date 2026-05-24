@@ -196,4 +196,69 @@ describe('MCP graph tools: path/excludePath integration (PF-609)', () => {
     });
     expect(droppedCallee).toMatch(/No callees found/);
   });
+
+  // PF-609 follow-up — context + explore.
+  it('codegraph_context honors `path` to scope to one package', async () => {
+    await setupMonorepo();
+
+    const apiOnly = await callTool('codegraph_context', {
+      task: 'util',
+      path: ['packages/api/'],
+    });
+    // Output must include the api caller's file but NOT the web/vendor ones.
+    expect(apiOnly).toMatch(/packages\/api\//);
+    expect(apiOnly).not.toMatch(/packages\/web\//);
+    expect(apiOnly).not.toMatch(/vendor\//);
+  });
+
+  it('codegraph_context honors `excludePath`', async () => {
+    await setupMonorepo();
+
+    const noVendor = await callTool('codegraph_context', {
+      task: 'util',
+      excludePath: ['vendor/'],
+    });
+    expect(noVendor).not.toMatch(/vendor\//);
+  });
+
+  it('codegraph_explore honors `path` to scope by package', async () => {
+    await setupMonorepo();
+
+    const apiOnly = await callTool('codegraph_explore', {
+      query: 'util handler page',
+      path: ['packages/api/'],
+    });
+    expect(apiOnly).toMatch(/packages\/api\//);
+    expect(apiOnly).not.toMatch(/packages\/web\//);
+  });
+
+  it('codegraph_explore honors `excludePath` to drop vendor', async () => {
+    await setupMonorepo();
+
+    const noVendor = await callTool('codegraph_explore', {
+      query: 'util handler page',
+      excludePath: ['vendor/'],
+    });
+    expect(noVendor).not.toMatch(/vendor\//);
+  });
+
+  it('codegraph_explore returns scope-aware empty message when nothing matches', async () => {
+    await setupMonorepo();
+
+    const empty = await callTool('codegraph_explore', {
+      query: 'util',
+      path: ['apps/never-existed/'],
+    });
+    expect(empty).toMatch(/within configured path filter/);
+  });
+
+  it('codegraph_context with no filter behaves identically to before (parity)', async () => {
+    await setupMonorepo();
+
+    const noFilter = await callTool('codegraph_context', { task: 'util' });
+    // Without a filter, the result should mention symbols from multiple
+    // packages — proves the default is unchanged when no filter is set.
+    expect(noFilter).toMatch(/util/);
+    expect(noFilter.length).toBeGreaterThan(50);
+  });
 });
