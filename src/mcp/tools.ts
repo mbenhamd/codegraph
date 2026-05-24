@@ -653,6 +653,66 @@ export const tools: ToolDefinition[] = [
     },
   },
   {
+    name: 'codegraph_component_styles',
+    description:
+      'PF-696 (Phase B). For a JSX function / method / component, list every CSS class it applies via `className=` — connected to the actual selector nodes (PF-695) in the indexed CSS. Returns each (class, defining .css file, line) so you can pivot from "this component" to "the styles it depends on". **Definite-only**: dynamic class expressions (`className={cls}`, `cn(cond && \'maybe\')`) flag the component but DO NOT add references to specific classes — the output is exact, not "possible". Tailwind utility classes are filtered out by default; set `CODEGRAPH_INCLUDE_TAILWIND=1` at index time to include them. **Persistence caveat**: the "has dynamic class expressions" warning currently surfaces only when the same MCP process did the indexing — the flag is not persisted to SQLite (follow-up PR adds the column). For now, missing-warning means "maybe-dynamic, verify with grep".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        component: {
+          type: 'string',
+          description:
+            'Component / function name to look up (e.g. `Card`, `FeatureCardHero`). Matches on node `name` first, then qualifiedName substring as fallback.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum class references to return (default 50, max 500).',
+          default: 50,
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['component'],
+    },
+  },
+  {
+    name: 'codegraph_class_consumers',
+    description:
+      'PF-696 (Phase B). Reverse lookup: for a CSS class (e.g. `.feature-card__title`), list every component / function that applies it via `className=`. The reciprocal of `codegraph_component_styles`. Answers "if I rename or remove this class, what JSX breaks?".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        className: {
+          type: 'string',
+          description:
+            'CSS class name including the leading `.` (e.g. `.feature-card__title`). Bare names (`feature-card__title`) are accepted and the `.` is added.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum consumers to return (default 50, max 500).',
+          default: 50,
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['className'],
+    },
+  },
+  {
+    name: 'codegraph_unused_selectors',
+    description:
+      'PF-696 (Phase B). Find CSS selectors that are defined in the index but referenced by zero JSX components — likely dead CSS. The claim is now honest because Phase B added the JSX → selector edges; in Phase A this would have been a false-positive trap. **Caveats**: false positives still possible for (1) classes applied via dynamic expressions (`className={cls}`) — the consumer component is flagged `hasDynamicClassNames: true`; (2) classes used in non-JSX surfaces (CMS HTML, server templates, runtime string construction); (3) classes used only when Tailwind is opted in but the index was built without it. Treat output as "candidates to remove after grep verification", not "definitely unused". **Performance**: iterates incoming-edge queries per selector (N+1); fine for projects under ~5k selectors. Larger indexes will get a batch-query optimization in a follow-up PR.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Maximum unused selectors to return (default 100, max 500).',
+          default: 100,
+        },
+        projectPath: projectPathProperty,
+      },
+    },
+  },
+  {
     name: 'codegraph_explain',
     description:
       'Surface a single edge\'s persisted resolver provenance (PF-693). Answers "WHY does CodeGraph think this call resolves here?" by showing extractor (tree-sitter/scip/heuristic), resolver strategy (import/framework/qualified-name/exact-match/instance-method/file-path/fuzzy), confidence, raw metadata, and source/target node details. **Honest scope**: `traceAvailable: false` is locked at false today — the resolver discards loser strategy attempts; only the winner\'s tag survives. This surfaces breadcrumbs, not a causal explanation. Round-trip: get `edgeId` (or full `edge` identity) from `codegraph_callers`/`codegraph_callees` JSON output, pass it here.',
@@ -1005,6 +1065,12 @@ export class ToolHandler {
           return await this.handleExplain(args);
         case 'codegraph_css_selectors':
           return await this.handleCssSelectors(args);
+        case 'codegraph_component_styles':
+          return await this.handleComponentStyles(args);
+        case 'codegraph_class_consumers':
+          return await this.handleClassConsumers(args);
+        case 'codegraph_unused_selectors':
+          return await this.handleUnusedSelectors(args);
         default:
           return this.errorResult(`Unknown tool: ${toolName}`);
       }
@@ -2780,6 +2846,179 @@ export class ToolHandler {
     if (rows.length === limit) {
       lines.push('');
       lines.push(`> Truncated at \`limit=${limit}\`. Narrow the pattern or raise the limit for more.`);
+    }
+
+    return this.textResult(this.truncateOutput(lines.join('\n')));
+  }
+
+  /**
+   * Handle codegraph_component_styles — PF-696 Phase B. Find the
+   * component node, list its outgoing `references` edges to
+   * selector-kind targets.
+   */
+  private async handleComponentStyles(args: Record<string, unknown>): Promise<ToolResult> {
+    const componentName = this.validateString(args.component, 'component');
+    if (typeof componentName !== 'string') return componentName;
+    const limit = clamp(Number(args.limit) || 50, 1, 500);
+
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    // Find component nodes by exact name first; fall back to substring
+    // on qualifiedName so users can disambiguate by file path.
+    const allNodes = cg
+      .searchNodes(componentName, { limit: 20 })
+      .map((s) => s.node)
+      .filter(
+        (n) =>
+          n.kind === 'function' ||
+          n.kind === 'method' ||
+          n.kind === 'component' ||
+          n.kind === 'class',
+      );
+    const exact = allNodes.filter((n) => n.name === componentName);
+    const candidates = exact.length > 0 ? exact : allNodes;
+    if (candidates.length === 0) {
+      return this.textResult(`No component / function named \`${componentName}\` found in the index.`);
+    }
+
+    const lines: string[] = [`## CSS classes applied by \`${componentName}\``];
+    let totalRefs = 0;
+    for (const comp of candidates) {
+      const outgoing = cg.getOutgoingEdges(comp.id).filter((e) => e.kind === 'references');
+      const selectorTargets: { name: string; filePath: string; startLine: number }[] = [];
+      for (const e of outgoing) {
+        const target = cg.getNode(e.target);
+        if (!target || target.kind !== 'selector') continue;
+        selectorTargets.push({
+          name: target.name,
+          filePath: target.filePath,
+          startLine: target.startLine,
+        });
+        if (selectorTargets.length >= limit) break;
+      }
+      lines.push('', `### \`${comp.qualifiedName}\` — ${comp.filePath}:${comp.startLine}`);
+      if ((comp as Node & { hasDynamicClassNames?: boolean }).hasDynamicClassNames) {
+        lines.push('> ⚠ This component has DYNAMIC className expressions (template literals, identifiers, or `cn(cond && ...)`); the list below is the DEFINITE classes only. Use grep for the dynamic cases.');
+      }
+      if (selectorTargets.length === 0) {
+        lines.push('_No definite class references resolved to indexed CSS selectors._');
+        continue;
+      }
+      for (const t of selectorTargets) {
+        lines.push(`- \`${t.name}\` — defined at ${t.filePath}:${t.startLine}`);
+        totalRefs++;
+      }
+    }
+    if (totalRefs === 0) {
+      lines.push('', '_Tip: ensure the CSS files defining these classes are in the indexed project. Tailwind utility classes are filtered by default — set `CODEGRAPH_INCLUDE_TAILWIND=1` at index time to include them._');
+    }
+    return this.textResult(this.truncateOutput(lines.join('\n')));
+  }
+
+  /**
+   * Handle codegraph_class_consumers — PF-696 Phase B. Reverse of
+   * `codegraph_component_styles`: for a CSS class name, list every
+   * component / function that applies it.
+   */
+  private async handleClassConsumers(args: Record<string, unknown>): Promise<ToolResult> {
+    const rawClassName = this.validateString(args.className, 'className');
+    if (typeof rawClassName !== 'string') return rawClassName;
+    const limit = clamp(Number(args.limit) || 50, 1, 500);
+
+    // Accept bare `feature-card` or dotted `.feature-card`.
+    const dottedName = rawClassName.startsWith('.') || rawClassName.startsWith('#')
+      ? rawClassName
+      : '.' + rawClassName;
+
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+
+    // Selector nodes are indexed by exact name; multiple files may
+    // define the same class so we may get multiple nodes.
+    const selectors = cg.getNodesByKind('selector').filter((n) => n.name === dottedName);
+    if (selectors.length === 0) {
+      return this.textResult(`No CSS selector named \`${dottedName}\` found in the index.`);
+    }
+
+    const consumerIds = new Set<string>();
+    for (const sel of selectors) {
+      for (const e of cg.getIncomingEdges(sel.id)) {
+        if (e.kind !== 'references') continue;
+        consumerIds.add(e.source);
+        if (consumerIds.size >= limit) break;
+      }
+      if (consumerIds.size >= limit) break;
+    }
+
+    const lines: string[] = [
+      `## Components consuming \`${dottedName}\``,
+      '',
+      `Selector defined in ${selectors.length} file(s):`,
+    ];
+    for (const sel of selectors) {
+      lines.push(`- ${sel.filePath}:${sel.startLine}`);
+    }
+    lines.push('');
+
+    if (consumerIds.size === 0) {
+      lines.push(`_No JSX components reference \`${dottedName}\` via static className. Possible reasons: (a) class is only used in dynamic expressions, (b) the JSX surface isn't indexed, (c) class is genuinely unused._`);
+      return this.textResult(this.truncateOutput(lines.join('\n')));
+    }
+
+    lines.push(`### Consumers (${consumerIds.size})`);
+    for (const id of consumerIds) {
+      const n = cg.getNode(id);
+      if (!n) continue;
+      lines.push(`- \`${n.qualifiedName}\` — ${n.filePath}:${n.startLine}`);
+    }
+
+    return this.textResult(this.truncateOutput(lines.join('\n')));
+  }
+
+  /**
+   * Handle codegraph_unused_selectors — PF-696 Phase B. List
+   * selector nodes that have ZERO incoming `references` edges from
+   * non-selector nodes. Now an honest claim because Phase B
+   * provides the JSX → selector references.
+   */
+  private async handleUnusedSelectors(args: Record<string, unknown>): Promise<ToolResult> {
+    const limit = clamp(Number(args.limit) || 100, 1, 500);
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+
+    const allSelectors = cg.getNodesByKind('selector');
+    if (allSelectors.length === 0) {
+      return this.textResult(
+        'No CSS selectors found in the index. Either no CSS files were indexed, or the index predates the PF-695 CSS extractor.',
+      );
+    }
+
+    const unused: typeof allSelectors = [];
+    for (const sel of allSelectors) {
+      const incoming = cg.getIncomingEdges(sel.id);
+      const referencedByNonSelector = incoming.some((e) => {
+        if (e.kind !== 'references') return false;
+        const source = cg.getNode(e.source);
+        return source !== null && source.kind !== 'selector';
+      });
+      if (!referencedByNonSelector) unused.push(sel);
+      if (unused.length >= limit) break;
+    }
+
+    const lines: string[] = [
+      '## CSS selectors with zero JSX consumers',
+      '',
+      `Found **${unused.length}** of ${allSelectors.length} selectors with no resolved JSX className reference.`,
+      '',
+      '> **Caveats**: false positives possible if classes are applied via dynamic expressions (`className={cls}`), CMS HTML, server templates, or runtime string construction. Treat as candidates to remove after grep verification, not as definitively unused.',
+      '',
+    ];
+    if (unused.length === 0) {
+      lines.push('_Every indexed selector has at least one JSX consumer._');
+      return this.textResult(this.truncateOutput(lines.join('\n')));
+    }
+    for (const sel of unused) {
+      lines.push(`- \`${sel.name}\` — ${sel.filePath}:${sel.startLine}`);
+    }
+    if (unused.length === limit) {
+      lines.push('', `> Truncated at \`limit=${limit}\`.`);
     }
 
     return this.textResult(this.truncateOutput(lines.join('\n')));
