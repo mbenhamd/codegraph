@@ -5,6 +5,20 @@
  */
 
 import CodeGraph, { findNearestCodeGraphRoot } from '../index';
+import { getDatabasePath } from '../db';
+import { diffDatabases, type DiffResult } from '../diff';
+import {
+  findDuplicates,
+  DEFAULT_DUPLICATE_KINDS,
+  DEFAULT_MIN_LINES,
+  type DuplicatesResult,
+} from '../duplicates';
+import {
+  explainEdgeById,
+  explainEdgeByCanonical,
+  formatExplainNarrative,
+  type ExplainResult,
+} from '../explain';
 import type { Node, Edge, SearchResult, Subgraph, TaskContext, NodeKind } from '../types';
 import { createHash } from 'crypto';
 import {
@@ -557,6 +571,100 @@ export const tools: ToolDefinition[] = [
       },
     },
   },
+  {
+    name: 'codegraph_diff',
+    description:
+      'Structural diff between two CodeGraph indexes (PF-691). Compares two `.codegraph/codegraph.db` snapshots and reports added/removed/changed files, nodes, and edges with field-level change lists (astHash → body change, sigHash → contract change, qualifiedName → moved within file). Read-only — the snapshots are never modified. Use when answering "what changed between branch X and branch Y", "did this refactor change the API", or "which functions drifted across this migration". The caller handles git checkouts: build the index on branch A, save the DB; switch to branch B, build the index, save its DB; then call this tool with both paths. fingerprintCoverage in the output flags Liquid/Vue/Svelte gaps where body-level changes won\'t surface.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        oldProjectPath: {
+          type: 'string',
+          description:
+            'Project path containing the "old" CodeGraph index (its .codegraph/codegraph.db). Walks up from this path to find the nearest .codegraph/ root.',
+        },
+        newProjectPath: {
+          type: 'string',
+          description:
+            'Project path containing the "new" CodeGraph index. Use the same path as oldProjectPath to diff a DB against itself (sanity check).',
+        },
+        maxChangedNodes: {
+          type: 'number',
+          description: 'Maximum number of changed-node detail rows to render in text output (default: 20). Full payload is always available — this caps display only.',
+          default: 20,
+        },
+        maxChangedEdges: {
+          type: 'number',
+          description: 'Maximum number of changed-edge detail rows to render in text output (default: 10).',
+          default: 10,
+        },
+      },
+      required: ['oldProjectPath', 'newProjectPath'],
+    },
+  },
+  {
+    name: 'codegraph_duplicates',
+    description:
+      'Find clone groups in the index (PF-692). Reports Type-1 (exact body match — `ast_hash`) and Type-2 (same structure, renamed locals — `ast_shape_hash`) clone sets. Defaults to function+method, ≥10 lines per symbol. Each group includes `fileCount` (cross-file vs same-file refactor targets) and `coveredByExactGroup` (shape group where some members are already in an exact group). Use when answering "where is this body duplicated", "refactor candidates by clone size", or "did we copy/paste this function". v6 schema required (PR #38); a v5 DB or migrated-not-reindexed DB produces a clear error.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: projectPathProperty,
+        kinds: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Symbol kinds to include. Defaults to ["function", "method"]. Framework-extractor kinds (component, route) typically lack fingerprints — narrow to function/method for useful clone detection.',
+        },
+        minLines: {
+          type: 'number',
+          description:
+            'Minimum endLine - startLine + 1 to keep a symbol (default: 10 — standard CPD/jscpd floor). Lower values flood output with one-liner accessors; higher values miss legitimate short clones.',
+          default: 10,
+        },
+        maxGroups: {
+          type: 'number',
+          description: 'Maximum number of clone groups to render in text output (default: 20). Largest clone-sets come first.',
+          default: 20,
+        },
+      },
+    },
+  },
+  {
+    name: 'codegraph_explain',
+    description:
+      'Surface a single edge\'s persisted resolver provenance (PF-693). Answers "WHY does CodeGraph think this call resolves here?" by showing extractor (tree-sitter/scip/heuristic), resolver strategy (import/framework/qualified-name/exact-match/instance-method/file-path/fuzzy), confidence, raw metadata, and source/target node details. **Honest scope**: `traceAvailable: false` is locked at false today — the resolver discards loser strategy attempts; only the winner\'s tag survives. This surfaces breadcrumbs, not a causal explanation. Round-trip: get `edgeId` (or full `edge` identity) from `codegraph_callers`/`codegraph_callees` JSON output, pass it here.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: projectPathProperty,
+        edgeId: {
+          type: 'number',
+          description: 'Edge primary key (integer). Index-local — resets on rebuild. Get this from a recent codegraph_callers/codegraph_callees call. Either edgeId OR (source + target + kind) is required.',
+        },
+        source: {
+          type: 'string',
+          description: 'Canonical lookup: source node id (rebuild-stable). Required if edgeId not provided.',
+        },
+        target: {
+          type: 'string',
+          description: 'Canonical lookup: target node id.',
+        },
+        kind: {
+          type: 'string',
+          description: 'Canonical lookup: edge kind (calls, references, imports, ...). REQUIRED when using source/target form — the same node pair can be connected by multiple kinds.',
+        },
+        line: {
+          type: 'number',
+          description: 'Canonical lookup: line number for disambiguation when source/target/kind matches multiple edges.',
+        },
+        col: {
+          type: 'number',
+          description: 'Canonical lookup: column number for disambiguation.',
+        },
+      },
+    },
+  },
 ];
 
 /**
@@ -867,6 +975,12 @@ export class ToolHandler {
           return await this.handleStatus(args);
         case 'codegraph_files':
           return await this.handleFiles(args);
+        case 'codegraph_diff':
+          return await this.handleDiff(args);
+        case 'codegraph_duplicates':
+          return await this.handleDuplicates(args);
+        case 'codegraph_explain':
+          return await this.handleExplain(args);
         default:
           return this.errorResult(`Unknown tool: ${toolName}`);
       }
@@ -2193,6 +2307,394 @@ export class ToolHandler {
       const sig = c.signature ? ` — \`${c.signature}\`` : '';
       lines.push(`- ${c.name} (${c.kind})${loc}${sig}`);
     }
+    return lines.join('\n');
+  }
+
+  /**
+   * Resolve a project path to its `.codegraph/codegraph.db` location
+   * WITHOUT opening the DB. Runs the same access-policy check and
+   * root-walking logic as `getCodeGraph()` but returns just the path
+   * — so diff/duplicates/explain can open the DB in immutable
+   * read-only mode themselves without first WAL-converting the file
+   * via `DatabaseConnection.open`.
+   */
+  private resolveDbPathReadOnly(projectPath?: string): { dbPath: string; resolvedRoot: string } {
+    const searchFrom = projectPath ?? this.defaultProjectHint ?? process.cwd();
+
+    if (projectPath && existsSync(projectPath)) {
+      const accessCheck = this.projectAccess.check(projectPath);
+      if (!accessCheck.allowed) {
+        throw new Error(
+          accessCheck.reason ?? `Project path is not in the allowed-roots policy.`,
+        );
+      }
+      const pathError = validateProjectPath(projectPath);
+      if (pathError) throw new Error(pathError);
+    }
+
+    const resolvedRoot = findNearestCodeGraphRoot(searchFrom);
+    if (!resolvedRoot) {
+      throw new Error(
+        `CodeGraph not initialized in ${searchFrom}. Run 'codegraph init' in that project first.`,
+      );
+    }
+
+    // Re-check the resolved root against the access policy — Codex
+    // BLOCKER fix. A caller passing `/disallowed/repo/nonexistent`
+    // skips the input-path access check (because !existsSync), and
+    // `findNearestCodeGraphRoot` can walk UP to `/disallowed/repo`
+    // and return its DB. Re-checking the resolved root closes that
+    // gap and mirrors what `getCodeGraph` does after caching.
+    const rootCheck = this.projectAccess.check(resolvedRoot);
+    if (!rootCheck.allowed) {
+      throw new Error(
+        rootCheck.reason ?? `Resolved project root ${resolvedRoot} is not in the allowed-roots policy.`,
+      );
+    }
+    return { dbPath: getDatabasePath(resolvedRoot), resolvedRoot };
+  }
+
+  /**
+   * Handle codegraph_diff — PF-691 DB-vs-DB structural diff. Resolves
+   * both project paths to their `.codegraph/codegraph.db` files and
+   * delegates to `diffDatabases`, which opens both in
+   * `file:?immutable=1` mode so the historical snapshots are never
+   * mutated.
+   */
+  private async handleDiff(args: Record<string, unknown>): Promise<ToolResult> {
+    const oldArg = this.validateString(args.oldProjectPath, 'oldProjectPath');
+    if (typeof oldArg !== 'string') return oldArg;
+    const newArg = this.validateString(args.newProjectPath, 'newProjectPath');
+    if (typeof newArg !== 'string') return newArg;
+    const oldPathCheck = this.validateOptionalPath(oldArg, 'oldProjectPath');
+    if (typeof oldPathCheck === 'object' && oldPathCheck !== undefined) return oldPathCheck;
+    const newPathCheck = this.validateOptionalPath(newArg, 'newProjectPath');
+    if (typeof newPathCheck === 'object' && newPathCheck !== undefined) return newPathCheck;
+
+    const oldDb = this.resolveDbPathReadOnly(oldArg).dbPath;
+    const newDb = this.resolveDbPathReadOnly(newArg).dbPath;
+
+    // Codex REVIEW fix: `0 || 20` defaults to 20 due to falsy coercion,
+    // but the formatter genuinely supports 0 ("render no detail rows").
+    // Distinguish "not provided" from "provided as 0".
+    const maxChangedNodes = clamp(
+      args.maxChangedNodes === undefined ? 20 : Number(args.maxChangedNodes),
+      0,
+      200,
+    );
+    const maxChangedEdges = clamp(
+      args.maxChangedEdges === undefined ? 10 : Number(args.maxChangedEdges),
+      0,
+      200,
+    );
+
+    let result: DiffResult;
+    try {
+      result = diffDatabases(oldDb, newDb);
+    } catch (err) {
+      return this.errorResult(`diff failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    return this.textResult(
+      this.truncateOutput(this.formatDiffResult(result, oldDb, newDb, maxChangedNodes, maxChangedEdges)),
+    );
+  }
+
+  private formatDiffResult(
+    r: DiffResult,
+    oldDb: string,
+    newDb: string,
+    maxChangedNodes: number,
+    maxChangedEdges: number,
+  ): string {
+    const s = r.summary;
+    const cov = r.fingerprintCoverage;
+    const lines: string[] = [
+      '## CodeGraph Diff',
+      '',
+      `**Old:** \`${oldDb}\``,
+      `**New:** \`${newDb}\``,
+      '',
+      '### Summary',
+      `- Files: +${s.addedFiles} / -${s.removedFiles} / ~${s.changedFiles}`,
+      `- Nodes: +${s.addedNodes} / -${s.removedNodes} / ~${s.changedNodes}`,
+      `- Edges: +${s.addedEdges} / -${s.removedEdges} / ~${s.changedEdges}`,
+    ];
+
+    const oldGap = cov.old.totalNodes - cov.old.nodesWithAstHash;
+    const newGap = cov.new.totalNodes - cov.new.nodesWithAstHash;
+    if (oldGap > 0 || newGap > 0) {
+      lines.push(
+        '',
+        '> ⚠ Fingerprint coverage is partial. Body-level changes inside synthesized-extractor',
+        '> files (Liquid/Vue/Svelte/YAML) won\'t surface in changedNodes.',
+        `> Old DB: ${cov.old.nodesWithAstHash}/${cov.old.totalNodes} nodes with fingerprints.`,
+        `> New DB: ${cov.new.nodesWithAstHash}/${cov.new.totalNodes} nodes with fingerprints.`,
+      );
+    }
+
+    if (r.changedFiles.length > 0) {
+      lines.push('', `### Changed Files (${r.changedFiles.length})`);
+      for (const f of r.changedFiles.slice(0, 10)) {
+        lines.push(`- \`${f.path}\` — ${f.changedFields.join(', ')}`);
+      }
+      if (r.changedFiles.length > 10) {
+        lines.push(`- …+${r.changedFiles.length - 10} more`);
+      }
+    }
+
+    if (r.changedNodes.length > 0 && maxChangedNodes > 0) {
+      const shown = r.changedNodes.slice(0, maxChangedNodes);
+      lines.push('', `### Changed Nodes (first ${shown.length} of ${r.changedNodes.length})`);
+      for (const c of shown) {
+        lines.push(`- **${c.name}** (${c.kind}) — ${c.changedFields.join(', ')}`);
+        lines.push(`  \`${c.filePath}\``);
+      }
+      if (r.changedNodes.length > shown.length) {
+        lines.push(`- …+${r.changedNodes.length - shown.length} more`);
+      }
+    }
+
+    if (r.changedEdges.length > 0 && maxChangedEdges > 0) {
+      const shown = r.changedEdges.slice(0, maxChangedEdges);
+      lines.push('', `### Changed Edges — metadata/provenance drift (first ${shown.length} of ${r.changedEdges.length})`);
+      for (const e of shown) {
+        lines.push(`- \`${e.kind}\` ${e.source} → ${e.target} (${e.changedFields.join(', ')})`);
+      }
+      if (r.changedEdges.length > shown.length) {
+        lines.push(`- …+${r.changedEdges.length - shown.length} more`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Handle codegraph_duplicates — PF-692 clone detection over the
+   * PF-690 fingerprint columns.
+   */
+  private async handleDuplicates(args: Record<string, unknown>): Promise<ToolResult> {
+    const { dbPath } = this.resolveDbPathReadOnly(args.projectPath as string | undefined);
+
+    let kinds: ReadonlyArray<string> | undefined;
+    if (Array.isArray(args.kinds)) {
+      const cleaned = (args.kinds as unknown[])
+        .filter((k): k is string => typeof k === 'string' && k.trim().length > 0)
+        .map((k) => k.trim());
+      if (cleaned.length === 0) {
+        return this.errorResult('kinds must contain at least one non-empty string');
+      }
+      kinds = cleaned;
+    } else if (args.kinds !== undefined) {
+      return this.errorResult('kinds must be an array of strings');
+    }
+
+    let minLines: number | undefined;
+    if (args.minLines !== undefined) {
+      const parsed = Number(args.minLines);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        return this.errorResult(`minLines must be a positive integer (got: ${args.minLines})`);
+      }
+      minLines = parsed;
+    }
+
+    const maxGroups = clamp(Number(args.maxGroups) || 20, 1, 200);
+
+    let result: DuplicatesResult;
+    try {
+      result = findDuplicates(dbPath, { kinds, minLines });
+    } catch (err) {
+      return this.errorResult(`duplicates failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    return this.textResult(
+      this.truncateOutput(
+        this.formatDuplicatesResult(
+          result,
+          kinds ?? DEFAULT_DUPLICATE_KINDS,
+          minLines ?? DEFAULT_MIN_LINES,
+          maxGroups,
+        ),
+      ),
+    );
+  }
+
+  private formatDuplicatesResult(
+    r: DuplicatesResult,
+    kindsUsed: ReadonlyArray<string>,
+    minLinesUsed: number,
+    maxGroups: number,
+  ): string {
+    const s = r.summary;
+    const cov = s.fingerprintCoverage;
+    const lines: string[] = [
+      '## CodeGraph Duplicates',
+      '',
+      `kinds=\`${kindsUsed.join(',')}\`, min-lines=${minLinesUsed}, ` +
+        `coverage=${cov.withAstHash}/${cov.eligible} eligible nodes have fingerprints.`,
+      '',
+      '### Summary',
+      `- Exact (Type-1) clone groups: ${s.exactGroups} (${s.exactNodes} duplicate nodes)`,
+      `- Shape (Type-2) clone groups: ${s.shapeGroups} (${s.shapeNodes} shape-only nodes)`,
+    ];
+
+    if (r.groups.length === 0) {
+      lines.push(
+        '',
+        `_No duplicate groups found with kinds=${kindsUsed.join(',')}, min-lines=${minLinesUsed}._`,
+      );
+      return lines.join('\n');
+    }
+
+    const shown = r.groups.slice(0, maxGroups);
+    lines.push('', `### Groups (first ${shown.length} of ${r.groups.length})`);
+    for (const g of shown) {
+      const cov = g.kind === 'shape' && g.coveredByExactGroup ? ' _[contains exact subset]_' : '';
+      lines.push(
+        `- **${g.kind}** \`${g.fingerprint.slice(0, 12)}\` — ${g.members.length} members in ${g.fileCount} file(s)${cov}`,
+      );
+      for (const m of g.members.slice(0, 5)) {
+        lines.push(`  - \`${m.filePath}:${m.startLine}\` ${m.qualifiedName}`);
+      }
+      if (g.members.length > 5) {
+        lines.push(`  - …+${g.members.length - 5} more members`);
+      }
+    }
+    if (r.groups.length > shown.length) {
+      lines.push('', `_Showing ${shown.length} of ${r.groups.length} groups; tighten --minLines or narrow --kinds for fewer results._`);
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * Handle codegraph_explain — PF-693 single-edge resolution trace.
+   */
+  private async handleExplain(args: Record<string, unknown>): Promise<ToolResult> {
+    const { dbPath } = this.resolveDbPathReadOnly(args.projectPath as string | undefined);
+
+    const edgeIdRaw = args.edgeId;
+    const hasEdgeId = edgeIdRaw !== undefined && edgeIdRaw !== null;
+    const hasCanonical =
+      args.source !== undefined ||
+      args.target !== undefined ||
+      args.kind !== undefined ||
+      args.line !== undefined ||
+      args.col !== undefined;
+
+    if (hasEdgeId && hasCanonical) {
+      return this.errorResult(
+        'Provide either edgeId OR canonical source/target/kind, not both.',
+      );
+    }
+    if (!hasEdgeId && !hasCanonical) {
+      return this.errorResult(
+        'Provide either edgeId (from a recent codegraph_callers/callees output) OR source + target + kind.',
+      );
+    }
+
+    let result: ExplainResult;
+    try {
+      if (hasEdgeId) {
+        const id = Number(edgeIdRaw);
+        if (!Number.isInteger(id) || id < 1) {
+          return this.errorResult(`edgeId must be a positive integer (got: ${edgeIdRaw})`);
+        }
+        result = explainEdgeById(dbPath, id);
+      } else {
+        if (typeof args.source !== 'string' || args.source.length === 0) {
+          return this.errorResult('source must be a non-empty string when using canonical lookup');
+        }
+        if (typeof args.target !== 'string' || args.target.length === 0) {
+          return this.errorResult('target must be a non-empty string when using canonical lookup');
+        }
+        if (typeof args.kind !== 'string' || args.kind.length === 0) {
+          return this.errorResult(
+            'kind is required when using canonical lookup (the same source/target pair can be connected by multiple edge kinds — try kind: "calls")',
+          );
+        }
+        const parseOptInt = (raw: unknown, label: string): number | undefined | ToolResult => {
+          if (raw === undefined || raw === null) return undefined;
+          const n = Number(raw);
+          if (!Number.isInteger(n) || n < 0) {
+            return this.errorResult(`${label} must be a non-negative integer (got: ${raw})`);
+          }
+          return n;
+        };
+        const line = parseOptInt(args.line, 'line');
+        if (line !== undefined && typeof line !== 'number') return line;
+        const col = parseOptInt(args.col, 'col');
+        if (col !== undefined && typeof col !== 'number') return col;
+
+        result = explainEdgeByCanonical(dbPath, {
+          source: args.source,
+          target: args.target,
+          kind: args.kind,
+          line: line as number | undefined,
+          col: col as number | undefined,
+        });
+      }
+    } catch (err) {
+      return this.errorResult(`explain failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    return this.textResult(this.truncateOutput(this.formatExplainMcp(result)));
+  }
+
+  private formatExplainMcp(r: ExplainResult): string {
+    const lines: string[] = [
+      '## CodeGraph Edge Explanation',
+      '',
+      '```',
+      formatExplainNarrative(r),
+      '```',
+      '',
+      '### Provenance',
+      `- **Edge id:** ${r.edgeId} _(index-local — resets on rebuild)_`,
+      `- **Kind:** ${r.kind}`,
+      `- **Extractor:** ${r.extractorProvenance ?? '_(unknown)_'}`,
+      `- **Resolver strategy:** ${r.resolvedBy ?? '_(no resolver metadata)_'}`,
+      `- **Confidence:** ${r.confidence !== null ? r.confidence.toFixed(2) : '_(unknown)_'}`,
+    ];
+
+    if (r.sourceNode) {
+      lines.push(
+        '',
+        '### Source',
+        `\`${r.sourceNode.qualifiedName}\` — ${r.sourceNode.filePath}${
+          r.line !== null ? `:${r.line}${r.col !== null ? `:${r.col}` : ''}` : ''
+        }`,
+      );
+    }
+    if (r.targetNode) {
+      lines.push(
+        '',
+        '### Target',
+        `\`${r.targetNode.qualifiedName}\` — ${r.targetNode.filePath}:${r.targetNode.startLine}`,
+      );
+    }
+
+    if (r.rawMetadata) {
+      lines.push(
+        '',
+        '### Raw metadata',
+        '_Non-object metadata (legacy/unexpected shape); inspect as opaque JSON:_',
+        '```json',
+        r.rawMetadata,
+        '```',
+      );
+    } else if (r.metadata && Object.keys(r.metadata).length > 0) {
+      lines.push('', '### Raw metadata', '```json', JSON.stringify(r.metadata, null, 2), '```');
+    }
+
+    if (!r.traceAvailable) {
+      lines.push(
+        '',
+        '> **Scope note:** `traceAvailable: false` — the resolver discards loser strategy',
+        '> attempts; only the winner survives. This explanation is breadcrumb-level, not',
+        '> a full causal trace. A future PR will persist `edge_resolution_traces`.',
+      );
+    }
+
     return lines.join('\n');
   }
 
