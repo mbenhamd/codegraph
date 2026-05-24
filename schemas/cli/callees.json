@@ -9,6 +9,10 @@
   "properties": {
     "tool": { "const": "callees" },
     "symbol": { "type": "string" },
+    "notFound": {
+      "type": "boolean",
+      "description": "Set to true when the symbol does not exist in the index. `callees` is then [] and consumers can distinguish 'symbol absent' from 'symbol exists but calls nothing'."
+    },
     "callees": {
       "type": "array",
       "items": {

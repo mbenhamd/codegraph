@@ -8,6 +8,11 @@
   "additionalProperties": true,
   "properties": {
     "tool": { "const": "files" },
+    "reason": {
+      "type": "string",
+      "enum": ["not_indexed", "no_matches"],
+      "description": "Set when `files` is []: `not_indexed` if the project IS initialized but the file index is empty (usually requires running `codegraph index`), `no_matches` if filters left no rows. A completely uninitialized project remains a plain-text error path with process.exit(1)."
+    },
     "files": {
       "type": "array",
       "items": {

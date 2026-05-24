@@ -9,6 +9,10 @@
   "properties": {
     "tool": { "const": "impact" },
     "symbol": { "type": "string" },
+    "notFound": {
+      "type": "boolean",
+      "description": "Set to true when the symbol does not exist in the index. `affected` is then [] and `nodeCount`/`edgeCount` are 0."
+    },
     "depth": { "type": "integer", "minimum": 1 },
     "nodeCount": { "type": "integer", "minimum": 0 },
     "edgeCount": { "type": "integer", "minimum": 0 },
